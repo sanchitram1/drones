@@ -1,1 +1,7 @@
 .venv
+
+# Ignore the data folder and all its contents
+data/
+
+# Ignore the cache folder and all its contents
+cache/
