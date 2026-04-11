@@ -1,0 +1,33 @@
+# Drone Delivery Simulation - Requirements
+# Install: pip install -r requirements.txt
+
+# Core simulation
+networkx>=3.2
+numpy>=1.24
+scipy>=1.11
+pandas>=2.0
+
+# Geospatial / SF data
+osmnx>=1.9
+geopandas>=0.14
+shapely>=2.0
+pyproj>=3.6
+
+# Visualization
+matplotlib>=3.8
+plotly>=5.18
+folium>=0.15
+
+# BlueSky ATM Simulator (install separately)
+# pip install bluesky-simulator
+
+# Data fetching
+requests>=2.31
+kaggle>=1.6   # for Uber Eats dataset
+
+# Jupyter support
+jupyter>=1.0
+ipywidgets>=8.0
+
+# Progress bars
+tqdm>=4.66
