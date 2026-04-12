@@ -55,12 +55,25 @@ def load_sf_street_network(cfg: SFConfig = None,
     else:
         print("  Downloading SF street network from OpenStreetMap...")
         # Download drivable street network for the bounding box
-        G = ox.graph_from_bbox(
-            bbox=(cfg.lat_range[1], cfg.lat_range[0], 
-                  cfg.lon_range[1], cfg.lon_range[0]),
-            network_type='drive',
-            simplify=True
-        )
+        # bbox format depends on OSMnx version:
+        #   v2.x+: (west, south, east, north) = (left, bottom, right, top)
+        #   v1.x:  (north, south, east, west) as positional args
+        try:
+            # OSMnx >= 2.0: bbox = (west, south, east, north)
+            G = ox.graph_from_bbox(
+                bbox=(cfg.lon_range[0], cfg.lat_range[0],
+                      cfg.lon_range[1], cfg.lat_range[1]),
+                network_type='drive',
+                simplify=True
+            )
+        except TypeError:
+            # OSMnx 1.x: positional args (north, south, east, west)
+            G = ox.graph_from_bbox(
+                cfg.lat_range[1], cfg.lat_range[0],
+                cfg.lon_range[1], cfg.lon_range[0],
+                network_type='drive',
+                simplify=True
+            )
         ox.save_graphml(G, cache_path)
         print(f"  Saved to {cache_path}")
     
@@ -123,11 +136,20 @@ def load_sf_buildings(cfg: SFConfig = None,
         print("  Downloading SF buildings from OpenStreetMap...")
         # Use osmnx to get building footprints
         tags = {'building': True}
-        buildings = ox.features_from_bbox(
-            bbox=(cfg.lat_range[1], cfg.lat_range[0],
-                  cfg.lon_range[1], cfg.lon_range[0]),
-            tags=tags
-        )
+        try:
+            # OSMnx >= 2.0
+            buildings = ox.features_from_bbox(
+                bbox=(cfg.lon_range[0], cfg.lat_range[0],
+                      cfg.lon_range[1], cfg.lat_range[1]),
+                tags=tags
+            )
+        except TypeError:
+            # OSMnx 1.x
+            buildings = ox.features_from_bbox(
+                cfg.lat_range[1], cfg.lat_range[0],
+                cfg.lon_range[1], cfg.lon_range[0],
+                tags=tags
+            )
         
         # Extract height information
         # OSM stores heights in various tags
@@ -329,11 +351,20 @@ def load_sf_restaurants(cfg: SFConfig = None,
     print("  Downloading restaurant locations from OpenStreetMap...")
     try:
         tags = {'amenity': ['restaurant', 'fast_food', 'cafe', 'food_court']}
-        pois = ox.features_from_bbox(
-            bbox=(cfg.lat_range[1], cfg.lat_range[0],
-                  cfg.lon_range[1], cfg.lon_range[0]),
-            tags=tags
-        )
+        try:
+            # OSMnx >= 2.0
+            pois = ox.features_from_bbox(
+                bbox=(cfg.lon_range[0], cfg.lat_range[0],
+                      cfg.lon_range[1], cfg.lat_range[1]),
+                tags=tags
+            )
+        except TypeError:
+            # OSMnx 1.x
+            pois = ox.features_from_bbox(
+                cfg.lat_range[1], cfg.lat_range[0],
+                cfg.lon_range[1], cfg.lon_range[0],
+                tags=tags
+            )
         
         # Extract centroids for non-point geometries
         centroids = pois.geometry.centroid
