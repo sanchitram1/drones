@@ -493,9 +493,19 @@ def generate_demand(n_orders: int,
     return orders
 
 
-def snap_to_graph(lat: float, lon: float, 
+def snap_to_graph(lat: float, lon: float,
                   G: nx.MultiDiGraph) -> int:
-    """Find the nearest graph node to a lat/lon point."""
+    """Find the nearest graph node to a lat/lon point.
+
+    Handles CRS mismatch: if the graph is projected (e.g. UTM),
+    the lat/lon is converted to the graph's CRS before lookup.
+    """
+    from pyproj import Transformer
+    crs = G.graph.get('crs')
+    if crs and str(crs) != 'EPSG:4326':
+        transformer = Transformer.from_crs('EPSG:4326', crs, always_xy=True)
+        x, y = transformer.transform(lon, lat)
+        return ox.nearest_nodes(G, x, y)
     return ox.nearest_nodes(G, lon, lat)
 
 
