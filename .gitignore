@@ -5,3 +5,7 @@ data/
 
 # Ignore the cache folder and all its contents
 cache/
+figures/
+results/
+__pycache__/
+bluesky_scenarios/
