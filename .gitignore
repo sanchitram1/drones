@@ -11,3 +11,4 @@ __pycache__/
 bluesky_scenarios/
 .DS_Store
 __pycache__/data_loader.cpython-312.pyc
+.DS_Store
