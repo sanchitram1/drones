@@ -1,0 +1,529 @@
+% Notes:
+% - This is a network-based planner on the real SF street graph exported
+% - Altitude assignment is direction-based and corridor-safe altitude is
+%   increased above nearby building height with a 5 ft clearance.
+% - Drones can be delayed if an edge/intersection is already reserved.
+
+clear; clc; close all;
+
+rng(42);
+ft2m = 0.3048;
+params.maxAltitude_m      = 400 * ft2m;   % FAA-style ceiling
+params.clearance_m        = 5   * ft2m;   % stay at least 5 ft from buildings
+params.collisionRisk_m    = 10  * ft2m;   % 10 ft proximity threshold
+params.turnBuffer_s       = 3;            % time penalty at turns
+params.edgeHeadway_s      = 2;            % min same-lane spacing on same edge
+params.nodeHeadway_s      = 2;            % min spacing through intersections
+params.cruiseSpeed_mps    = 10;           % horizontal speed
+params.climbRate_mps      = 3;
+params.descendRate_mps    = 2;
+params.dt_s               = 60;           % demand time step
+params.simDuration_s      = 3 * 3600;     % 3 hours
+params.baseRate_perMin    = 2.5;          % average orders/min (adjustable)
+params.peakMultiplier     = 2.0;          % rush multiplier
+params.maxLaunchDelay_s   = 15 * 60;
+params.nPlotTraj          = 10;
+
+altBase.N = 70; altBase.S = 78; altBase.E = 86; altBase.W = 94;
+altBase.turn = 105;
+
+dataDir = fullfile(pwd, 'data');
+if ~isfolder(dataDir)
+    error(['Data folder not found. Put the exported SF files in ./data. ' ...
+           'See the helper export script that accompanies this MATLAB file.']);
+end
+
+nodesFile = pickFirstExisting(dataDir, {'sf_nodes.csv','nodes.csv'});
+edgesFile = pickFirstExisting(dataDir, {'sf_edges.csv','edges.csv'});
+censusFile = pickFirstExisting(dataDir, {'sf_census.csv','census.csv'});
+restFile = pickFirstExisting(dataDir, {'sf_restaurants.csv','restaurants.csv'});
+bldgFile = pickFirstExisting(dataDir, {'sf_buildings.csv','buildings.csv'});
+
+assert(~isempty(nodesFile), 'Could not find sf_nodes.csv / nodes.csv');
+assert(~isempty(edgesFile), 'Could not find sf_edges.csv / edges.csv');
+assert(~isempty(censusFile), 'Could not find sf_census.csv / census.csv');
+assert(~isempty(restFile), 'Could not find sf_restaurants.csv / restaurants.csv');
+
+nodes = readtable(nodesFile);
+edges = readtable(edgesFile);
+census = readtable(censusFile);
+restaurants = readtable(restFile);
+if ~isempty(bldgFile)
+    buildings = readtable(bldgFile);
+else
+    buildings = table();
+end
+
+requiredNodeCols = {'node_id','x','y'};
+requiredEdgeCols = {'u','v'};
+assert(all(ismember(requiredNodeCols, nodes.Properties.VariableNames)), 'nodes file missing required columns');
+assert(all(ismember(requiredEdgeCols, edges.Properties.VariableNames)), 'edges file missing required columns');
+
+if ~ismember('length_m', edges.Properties.VariableNames)
+    ux = lookupNodeField(nodes, edges.u, 'x');
+    uy = lookupNodeField(nodes, edges.u, 'y');
+    vx = lookupNodeField(nodes, edges.v, 'x');
+    vy = lookupNodeField(nodes, edges.v, 'y');
+    edges.length_m = hypot(vx-ux, vy-uy);
+end
+
+if ~ismember('max_building_height_m', edges.Properties.VariableNames)
+    if ~isempty(buildings) && all(ismember({'centroid_x','centroid_y','height_m'}, buildings.Properties.VariableNames))
+        edges.max_building_height_m = estimateEdgeBuildingHeights(edges, nodes, buildings);
+    else
+        edges.max_building_height_m = zeros(height(edges),1) + 12;
+    end
+end
+
+fprintf('Loaded %d nodes, %d edges, %d census zones, %d restaurants\n', ...
+    height(nodes), height(edges), height(census), height(restaurants));
+
+nodeKeys = normalizeIdColumn(nodes.node_id);
+edgeUKeys = normalizeIdColumn(edges.u);
+edgeVKeys = normalizeIdColumn(edges.v);
+nodeIndex = containers.Map(nodeKeys, num2cell(1:height(nodes)));
+
+keepEdge = false(height(edges),1);
+s = zeros(height(edges),1); t = zeros(height(edges),1);
+for i = 1:height(edges)
+    if isKey(nodeIndex, edgeUKeys{i}) && isKey(nodeIndex, edgeVKeys{i})
+        s(i) = nodeIndex(edgeUKeys{i});
+        t(i) = nodeIndex(edgeVKeys{i});
+        keepEdge(i) = true;
+    end
+end
+if ~all(keepEdge)
+    fprintf('Dropped %d edges whose endpoints were missing from sf_nodes.csv', sum(~keepEdge));
+    edges = edges(keepEdge,:);
+    s = s(keepEdge); t = t(keepEdge);
+end
+
+edges.required_alt_m = min(params.maxAltitude_m, edges.max_building_height_m + params.clearance_m);
+validMask = edges.required_alt_m <= params.maxAltitude_m;
+edges = edges(validMask,:);
+s = s(validMask); t = t(validMask);
+
+G = graph(s, t, edges.length_m);
+edgeEndNodes = [s t];
+
+nodeX = nodes.x; nodeY = nodes.y;
+
+timeVec = (0:params.dt_s:params.simDuration_s-params.dt_s)';
+minutes = timeVec/60;
+% Peak around lunch and dinner in the 3h window, just for simulation shape
+lambda_perMin = params.baseRate_perMin * (1 + 0.6*sin(2*pi*minutes/180 - pi/3));
+lambda_perMin = max(lambda_perMin, 0.3);
+lambda_perMin(round(end*0.35):round(end*0.55)) = lambda_perMin(round(end*0.35):round(end*0.55)) * params.peakMultiplier;
+
+arrivalsPerStep = zeros(size(lambda_perMin));
+for k = 1:numel(lambda_perMin)
+    arrivalsPerStep(k) = my_poissrnd(lambda_perMin(k) * (params.dt_s/60));
+end
+
+requestTimes = [];
+for k = 1:numel(arrivalsPerStep)
+    nA = arrivalsPerStep(k);
+    requestTimes = [requestTimes; timeVec(k) + rand(nA,1)*params.dt_s]; %#ok<AGROW>
+end
+requestTimes = sort(requestTimes);
+nOrders = numel(requestTimes);
+fprintf('Generated %d orders over %.1f hours\n', nOrders, params.simDuration_s/3600);
+
+%% ====================== 5. GENERATE REAL OD REQUESTS ===================
+% Origins sampled from restaurants, destinations weighted by pop density.
+originNodeIdx = zeros(nOrders,1);
+destNodeIdx   = zeros(nOrders,1);
+originXY      = zeros(nOrders,2);
+destXY        = zeros(nOrders,2);
+
+weights = census.pop_density;
+weights = weights / sum(weights);
+
+for i = 1:nOrders
+    rIdx = randi(height(restaurants));
+    cIdx = weightedSample(weights);
+
+    [originNodeIdx(i), originXY(i,:)] = nearestNodeLatLon(restaurants.lat(rIdx), restaurants.lon(rIdx), nodes);
+
+    dLat = census.lat(cIdx) + 0.0005*randn();
+    dLon = census.lon(cIdx) + 0.0005*randn();
+    [destNodeIdx(i), destXY(i,:)] = nearestNodeLatLon(dLat, dLon, nodes);
+
+    while destNodeIdx(i) == originNodeIdx(i)
+        cIdx = weightedSample(weights);
+        dLat = census.lat(cIdx) + 0.0005*randn();
+        dLon = census.lon(cIdx) + 0.0005*randn();
+        [destNodeIdx(i), destXY(i,:)] = nearestNodeLatLon(dLat, dLon, nodes);
+    end
+end
+
+%% ====================== 6. ROUTING + RESERVATION =======================
+edgeReservations = cell(numedges(G),1);      % [enter exit alt drone]
+nodeReservations = cell(numnodes(G),1);      % [timeStart timeEnd drone]
+
+routes = cell(nOrders,1);
+launchTime = zeros(nOrders,1);
+flightTime = zeros(nOrders,1);
+launchDelay = zeros(nOrders,1);
+routeDist = zeros(nOrders,1);
+routeTurns = zeros(nOrders,1);
+routeAltMean = zeros(nOrders,1);
+collisionRiskCount = zeros(nOrders,1);
+served = false(nOrders,1);
+
+for q = 1:nOrders
+    [pathNodes, pathEdges] = shortestpath(G, originNodeIdx(q), destNodeIdx(q));
+    if isempty(pathNodes) || numel(pathNodes) < 2
+        continue;
+    end
+
+    depTime = requestTimes(q);
+    [sched, depTimeResolved, riskCnt] = reserveRoute(pathNodes, pathEdges, depTime, ...
+        edgeReservations, nodeReservations, nodes, edgeEndNodes, edges, altBase, params);
+
+    if isempty(sched)
+        continue;
+    end
+
+    % Commit reservations
+    for e = 1:numel(sched.edgeId)
+        ee = sched.edgeId(e);
+        edgeReservations{ee} = [edgeReservations{ee}; sched.enter(e), sched.exit(e), sched.alt(e), q]; %#ok<AGROW>
+    end
+    for n = 2:numel(pathNodes)-1
+        nid = pathNodes(n);
+        nodeReservations{nid} = [nodeReservations{nid}; sched.nodeTime(n-1)-params.nodeHeadway_s/2, ...
+            sched.nodeTime(n-1)+params.nodeHeadway_s/2, q]; %#ok<AGROW>
+    end
+
+    routes{q} = pathNodes;
+    launchTime(q) = depTimeResolved;
+    flightTime(q) = sched.totalTime;
+    launchDelay(q) = depTimeResolved - requestTimes(q);
+    routeDist(q) = sum(edges.length_m(pathEdges));
+    routeTurns(q) = sched.turns;
+    routeAltMean(q) = mean(sched.alt);
+    collisionRiskCount(q) = riskCnt;
+    served(q) = true;
+end
+
+%% ====================== 7. SUMMARIES ===================================
+servedIdx = find(served);
+if isempty(servedIdx)
+    error('No orders were successfully served. Check corridor altitudes or data export.');
+end
+
+fprintf('\n========== REAL DATA RESULTS ==========\n');
+fprintf('Orders requested         : %d\n', nOrders);
+fprintf('Orders served            : %d\n', numel(servedIdx));
+fprintf('Service rate             : %.1f%%\n', 100*numel(servedIdx)/nOrders);
+fprintf('Avg launch delay         : %.1f s\n', mean(launchDelay(servedIdx)));
+fprintf('Avg route distance       : %.1f m\n', mean(routeDist(servedIdx)));
+fprintf('Avg flight time          : %.1f s (%.2f min)\n', mean(flightTime(servedIdx)), mean(flightTime(servedIdx))/60);
+fprintf('Avg turns                : %.2f\n', mean(routeTurns(servedIdx)));
+fprintf('Avg corridor altitude    : %.1f m\n', mean(routeAltMean(servedIdx)));
+fprintf('Total near-risk flags    : %d\n', sum(collisionRiskCount(servedIdx)));
+
+%% ====================== 8. VISUALIZATIONS ==============================
+figure('Name','SF Drone Delivery — Real Data','Position',[50 50 1700 950]);
+
+% 8a Street graph + served routes
+subplot(2,3,1); hold on; axis equal; grid on;
+plotStreetGraph(nodes, edgeEndNodes, [0.85 0.85 0.85]);
+sel = servedIdx(1:min(150,numel(servedIdx)));
+cm = turbo(max(numel(sel),2));
+for k = 1:numel(sel)
+    r = routes{sel(k)};
+    plot(nodeX(r), nodeY(r), '-', 'Color', [cm(k,:) 0.45], 'LineWidth', 1.1);
+end
+scatter(originXY(sel,1), originXY(sel,2), 10, 'g', 'filled');
+scatter(destXY(sel,1), destXY(sel,2), 10, 'r', 'filled');
+title('Real SF Network + Sample Served Routes');
+xlabel('x (m)'); ylabel('y (m)');
+
+% 8b 3D trajectories
+subplot(2,3,2); hold on; grid on; view(35,25);
+plotStreetGraph3(nodes, edgeEndNodes);
+for k = 1:min(params.nPlotTraj, numel(servedIdx))
+    idx = servedIdx(k);
+    [wx, wy, wz] = build3DTrajectory(routes{idx}, nodes, altBase, edges, G);
+    plot3(wx, wy, wz, 'LineWidth', 1.6);
+end
+title('3D Trajectories on Real SF Graph'); xlabel('x'); ylabel('y'); zlabel('altitude (m)');
+
+% 8c Demand time series
+subplot(2,3,3);
+plot(timeVec/60, arrivalsPerStep, 'LineWidth', 1.4);
+hold on; yline(mean(arrivalsPerStep),'r--','Mean');
+title('Demand Time Series'); xlabel('time (min)'); ylabel('orders / step'); grid on;
+
+% 8d Launch delay histogram
+subplot(2,3,4);
+histogram(launchDelay(servedIdx)/60, 20);
+title('Launch Delay Distribution'); xlabel('delay (min)'); ylabel('count'); grid on;
+
+% 8e Flight time vs route distance
+subplot(2,3,5);
+scatter(routeDist(servedIdx), flightTime(servedIdx)/60, 18, routeTurns(servedIdx), 'filled');
+cb = colorbar; ylabel(cb,'turn count');
+title('Flight Time vs Route Distance'); xlabel('distance (m)'); ylabel('flight time (min)'); grid on;
+
+% 8f Edge utilization heat map
+subplot(2,3,6); hold on; axis equal; grid on;
+util = cellfun(@(x) size(x,1), edgeReservations);
+plotEdgeUtilization(nodes, edgeEndNodes, util);
+title('Edge Utilization Heat Map'); xlabel('x (m)'); ylabel('y (m)');
+colormap(gca, hot);
+sgtitle('Decentralized Drone Delivery on Real San Francisco Network','FontWeight','bold');
+
+%% ====================== 9. OPTIONAL EXTRA FIGURES ======================
+figure('Name','Extra Metrics','Position',[100 100 1300 450]);
+
+subplot(1,3,1);
+if ~isempty(buildings) && all(ismember({'centroid_x','centroid_y','height_m'}, buildings.Properties.VariableNames))
+    scatter(buildings.centroid_x, buildings.centroid_y, 8, buildings.height_m, 'filled');
+    cb = colorbar; ylabel(cb,'building height (m)');
+    axis equal; grid on;
+    title('Building Height Centroids'); xlabel('x'); ylabel('y');
+else
+    text(0.1,0.5,'No MATLAB-friendly building file provided','FontSize',12);
+    axis off;
+end
+
+subplot(1,3,2);
+servedRateByStep = zeros(size(arrivalsPerStep));
+for k = 1:numel(timeVec)
+    maskReq = requestTimes >= timeVec(k) & requestTimes < timeVec(k)+params.dt_s;
+    maskServed = maskReq & served;
+    denom = sum(maskReq);
+    servedRateByStep(k) = 100 * sum(maskServed) / max(denom,1);
+end
+plot(timeVec/60, servedRateByStep, 'LineWidth', 1.4);
+ylim([0 100]); grid on;
+title('Service Rate Over Time'); xlabel('time (min)'); ylabel('served (%)');
+
+subplot(1,3,3);
+histogram(routeAltMean(servedIdx), 20);
+grid on;
+title('Mean Corridor Altitude Used'); xlabel('altitude (m)'); ylabel('count');
+
+fprintf('\nDone.\n');
+
+%% ====================== LOCAL FUNCTIONS ================================
+function f = pickFirstExisting(dataDir, candidates)
+f = '';
+for i = 1:numel(candidates)
+    trial = fullfile(dataDir, candidates{i});
+    if exist(trial, 'file')
+        f = trial;
+        return;
+    end
+end
+end
+
+function vals = lookupNodeField(nodes, nodeIds, fieldName)
+[~, loc] = ismember(nodeIds, nodes.node_id);
+vals = nodes.(fieldName)(loc);
+end
+
+function h = estimateEdgeBuildingHeights(edges, nodes, buildings)
+ux = lookupNodeField(nodes, edges.u, 'x'); uy = lookupNodeField(nodes, edges.u, 'y');
+vx = lookupNodeField(nodes, edges.v, 'x'); vy = lookupNodeField(nodes, edges.v, 'y');
+midx = (ux + vx)/2; midy = (uy + vy)/2;
+
+h = zeros(height(edges),1) + 12;
+if isempty(buildings), return; end
+BX = buildings.centroid_x; BY = buildings.centroid_y; BH = buildings.height_m;
+for i = 1:height(edges)
+    d = pointToSegmentDistance(BX, BY, ux(i), uy(i), vx(i), vy(i));
+    near = d <= 30; % similar to the Python corridor buffer concept
+    if any(near)
+        h(i) = max(BH(near));
+    end
+end
+end
+
+function d = pointToSegmentDistance(px, py, x1, y1, x2, y2)
+ABx = x2 - x1; ABy = y2 - y1;
+APx = px - x1; APy = py - y1;
+AB2 = ABx.^2 + ABy.^2;
+t = max(0, min(1, (APx.*ABx + APy.*ABy) ./ AB2));
+projx = x1 + t .* ABx; projy = y1 + t .* ABy;
+d = hypot(px - projx, py - projy);
+end
+
+function k = my_poissrnd(lambda)
+L = exp(-lambda); p = 1; k = 0;
+while p > L
+    k = k + 1;
+    p = p * rand();
+end
+k = k - 1;
+end
+
+function idx = weightedSample(w)
+r = rand(); c = cumsum(w(:)); idx = find(r <= c, 1, 'first');
+end
+
+function [nodeIdx, xy] = nearestNodeLatLon(lat, lon, nodes)
+% Best effort without requiring Mapping Toolbox.
+% Assumes nodes.csv already contains projected x/y plus lat/lon. If lat/lon
+% missing, falls back to nearest in x/y using lon/x and lat/y scales.
+if all(ismember({'lat','lon'}, nodes.Properties.VariableNames))
+    d2 = (nodes.lat - lat).^2 + (nodes.lon - lon).^2;
+else
+    d2 = (nodes.x - lon).^2 + (nodes.y - lat).^2;
+end
+[~, nodeIdx] = min(d2);
+xy = [nodes.x(nodeIdx), nodes.y(nodeIdx)];
+end
+
+function [sched, depResolved, riskCnt] = reserveRoute(pathNodes, pathEdges, requestTime, edgeRes, nodeRes, nodes, edgeEndNodes, edges, altBase, params)
+sched = struct([]); depResolved = []; riskCnt = 0;
+tryTime = requestTime;
+while tryTime <= requestTime + params.maxLaunchDelay_s
+    [ok, tmp, riskCnt] = trySchedule(pathNodes, pathEdges, tryTime, edgeRes, nodeRes, nodes, edgeEndNodes, edges, altBase, params);
+    if ok
+        sched = tmp; depResolved = tryTime; return;
+    end
+    tryTime = tryTime + 5;
+end
+end
+
+function [ok, sched, riskCnt] = trySchedule(pathNodes, pathEdges, depTime, edgeRes, nodeRes, nodes, edgeEndNodes, edges, altBase, params)
+ok = true; riskCnt = 0;
+E = numel(pathEdges);
+enter = zeros(E,1); exit = zeros(E,1); alt = zeros(E,1); nodeTime = zeros(max(E-1,0),1);
+curT = depTime; prevDir = '';
+turns = 0;
+
+for i = 1:E
+    n1 = pathNodes(i); n2 = pathNodes(i+1);
+    dx = nodes.x(n2) - nodes.x(n1);
+    dy = nodes.y(n2) - nodes.y(n1);
+    if abs(dx) >= abs(dy)
+        if dx >= 0, dir = 'E'; else, dir = 'W'; end
+    else
+        if dy >= 0, dir = 'N'; else, dir = 'S'; end
+    end
+
+    reqAlt = edges.required_alt_m(pathEdges(i));
+    cruiseAlt = max(reqAlt, altBase.(dir));
+    if cruiseAlt > params.maxAltitude_m
+        ok = false; sched = struct([]); return;
+    end
+
+    if i == 1
+        curT = curT + cruiseAlt / params.climbRate_mps;
+    elseif dir ~= prevDir
+        turns = turns + 1;
+        curT = curT + (altBase.turn - alt(i-1))/params.climbRate_mps + params.turnBuffer_s + ...
+            (altBase.turn - cruiseAlt)/params.descendRate_mps;
+    end
+
+    traverse = edges.length_m(pathEdges(i)) / params.cruiseSpeed_mps;
+    enter(i) = curT; exit(i) = curT + traverse; alt(i) = cruiseAlt;
+
+    % Edge deconfliction: same edge and same altitude within headway.
+    R = edgeRes{pathEdges(i)};
+    if ~isempty(R)
+        sameAlt = abs(R(:,3) - cruiseAlt) < params.collisionRisk_m;
+        overlap = (enter(i) < R(:,2) + params.edgeHeadway_s) & (exit(i) > R(:,1) - params.edgeHeadway_s);
+        if any(sameAlt & overlap)
+            ok = false; sched = struct([]); return;
+        end
+        riskCnt = riskCnt + sum(abs(R(:,3) - cruiseAlt) < params.collisionRisk_m & overlap);
+    end
+
+    curT = exit(i);
+    if i < E
+        interNode = pathNodes(i+1);
+        nodeTime(i) = curT;
+        NR = nodeRes{interNode};
+        if ~isempty(NR)
+            overlapNode = (curT + params.nodeHeadway_s/2 > NR(:,1)) & (curT - params.nodeHeadway_s/2 < NR(:,2));
+            if any(overlapNode)
+                ok = false; sched = struct([]); return;
+            end
+        end
+    else
+        curT = curT + cruiseAlt / params.descendRate_mps;
+    end
+    prevDir = dir;
+end
+
+sched.edgeId = pathEdges(:);
+sched.enter = enter;
+sched.exit = exit;
+sched.alt = alt;
+sched.nodeTime = nodeTime;
+sched.totalTime = curT - depTime;
+sched.turns = turns;
+end
+
+function plotStreetGraph(nodes, edgeEnds, colorVal)
+for i = 1:size(edgeEnds,1)
+    plot(nodes.x(edgeEnds(i,:)), nodes.y(edgeEnds(i,:)), '-', 'Color', colorVal, 'LineWidth', 0.3);
+end
+end
+
+function plotStreetGraph3(nodes, edgeEnds)
+for i = 1:size(edgeEnds,1)
+    plot3(nodes.x(edgeEnds(i,:)), nodes.y(edgeEnds(i,:)), [0 0], '-', 'Color', [0.85 0.85 0.85], 'LineWidth', 0.25);
+end
+end
+
+function [wx, wy, wz] = build3DTrajectory(pathNodes, nodes, altBase, edges, G)
+wx = []; wy = []; wz = [];
+prevDir = '';
+for i = 1:numel(pathNodes)-1
+    n1 = pathNodes(i); n2 = pathNodes(i+1);
+    dx = nodes.x(n2) - nodes.x(n1);
+    dy = nodes.y(n2) - nodes.y(n1);
+    if abs(dx) >= abs(dy)
+        if dx >= 0, dir = 'E'; else, dir = 'W'; end
+    else
+        if dy >= 0, dir = 'N'; else, dir = 'S'; end
+    end
+    eid = findedge(G, n1, n2);
+    cruiseAlt = max(edges.required_alt_m(eid), altBase.(dir));
+    if i == 1
+        wx = [wx nodes.x(n1) nodes.x(n1)];
+        wy = [wy nodes.y(n1) nodes.y(n1)];
+        wz = [wz 0 cruiseAlt];
+    elseif dir ~= prevDir
+        wx = [wx nodes.x(n1) nodes.x(n1)];
+        wy = [wy nodes.y(n1) nodes.y(n1)];
+        wz = [wz altBase.turn cruiseAlt];
+    end
+    wx = [wx nodes.x(n2)]; wy = [wy nodes.y(n2)]; wz = [wz cruiseAlt];
+    prevDir = dir;
+end
+wx = [wx nodes.x(pathNodes(end))]; wy = [wy nodes.y(pathNodes(end))]; wz = [wz 0];
+end
+
+function plotEdgeUtilization(nodes, edgeEnds, util)
+mx = max(util); if mx == 0, mx = 1; end
+for i = 1:size(edgeEnds,1)
+    c = util(i)/mx;
+    plot(nodes.x(edgeEnds(i,:)), nodes.y(edgeEnds(i,:)), '-', 'Color', [c 0 0], 'LineWidth', 0.5 + 2.5*c);
+end
+cb = colorbar; ylabel(cb,'relative utilization');
+end
+
+function out = normalizeIdColumn(ids)
+%NORMALIZEIDCOLUMN Convert IDs to trimmed string array for safe key lookup
+    if iscell(ids)
+        out = strings(size(ids));
+        for k = 1:numel(ids)
+            out(k) = string(strtrim(char(string(ids{k}))));
+        end
+    elseif isstring(ids)
+        out = strtrim(ids);
+    elseif ischar(ids)
+        out = string(strtrim(ids));
+    else
+        out = string(ids);
+        out = strtrim(out);
+    end
+end
