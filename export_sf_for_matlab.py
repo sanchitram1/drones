@@ -2,7 +2,6 @@ import pandas as pd
 import numpy as np
 from pathlib import Path
 import osmnx as ox
-import geopandas as gpd
 
 from data_loader import (
     load_sf_street_network,
@@ -41,11 +40,13 @@ def export_for_matlab():
     if node_col is None:
         node_col = nodes_reset.columns[0]
 
-    nodes_df = pd.DataFrame({
-        "node_id": nodes_reset[node_col].map(safe_str).values,
-        "x": nodes_reset.geometry.x.values,
-        "y": nodes_reset.geometry.y.values,
-    })
+    nodes_df = pd.DataFrame(
+        {
+            "node_id": nodes_reset[node_col].map(safe_str).values,
+            "x": nodes_reset.geometry.x.values,
+            "y": nodes_reset.geometry.y.values,
+        }
+    )
 
     nodes_df.to_csv(OUTDIR / "sf_nodes.csv", index=False)
     print(f"Saved {len(nodes_df)} nodes")
@@ -68,14 +69,20 @@ def export_for_matlab():
     for idx in range(len(edges_reset)):
         clearance_vals.append(float(clearances.get(idx, 12.0)))
 
-    edges_df = pd.DataFrame({
-        "u": edges_reset["u"].map(safe_str).values,
-        "v": edges_reset["v"].map(safe_str).values,
-        "length_m": pd.to_numeric(edges_reset["length"], errors="coerce").fillna(0).values,
-        "corridor_height_m": np.array(clearance_vals, dtype=float),
-    })
+    edges_df = pd.DataFrame(
+        {
+            "u": edges_reset["u"].map(safe_str).values,
+            "v": edges_reset["v"].map(safe_str).values,
+            "length_m": pd.to_numeric(edges_reset["length"], errors="coerce")
+            .fillna(0)
+            .values,
+            "corridor_height_m": np.array(clearance_vals, dtype=float),
+        }
+    )
 
-    edges_df = edges_df.dropna(subset=["u", "v", "length_m", "corridor_height_m"]).copy()
+    edges_df = edges_df.dropna(
+        subset=["u", "v", "length_m", "corridor_height_m"]
+    ).copy()
     edges_df = edges_df[edges_df["u"] != edges_df["v"]].copy()
 
     edges_df.to_csv(OUTDIR / "sf_edges.csv", index=False)

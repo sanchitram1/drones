@@ -12,9 +12,8 @@ References:
 """
 
 import numpy as np
-from typing import List, Optional
+from typing import Optional
 from pathlib import Path
-from config import ExperimentConfig
 
 # Reference location for converting local (x,y) to (lat,lon)
 # Default: center of SF study area
@@ -24,27 +23,30 @@ METERS_PER_DEG_LAT = 111320.0
 METERS_PER_DEG_LON = 111320.0 * np.cos(np.radians(REF_LAT))
 
 
-def xy_to_latlon(x: float, y: float, 
-                 ref_lat: float = REF_LAT, 
-                 ref_lon: float = REF_LON) -> tuple:
+def xy_to_latlon(
+    x: float, y: float, ref_lat: float = REF_LAT, ref_lon: float = REF_LON
+) -> tuple:
     """Convert local (x, y) meters to (lat, lon)."""
     lat = ref_lat + y / METERS_PER_DEG_LAT
     lon = ref_lon + x / METERS_PER_DEG_LON
     return (lat, lon)
 
 
-def export_scenario(missions, topology, 
-                    filename: str = "drone_delivery.scn",
-                    ref_lat: float = REF_LAT,
-                    ref_lon: float = REF_LON,
-                    n_drones: Optional[int] = None,
-                    cruise_speed_kts: float = 30.0):
+def export_scenario(
+    missions,
+    topology,
+    filename: str = "drone_delivery.scn",
+    ref_lat: float = REF_LAT,
+    ref_lon: float = REF_LON,
+    n_drones: Optional[int] = None,
+    cruise_speed_kts: float = 30.0,
+):
     """
     Generate a BlueSky .scn scenario file from planned missions.
-    
+
     Each drone is created with CRE command, given waypoints with ADDWPT,
     and set to follow the route with VNAV ON.
-    
+
     Parameters
     ----------
     missions : list of DroneMission objects
@@ -55,10 +57,10 @@ def export_scenario(missions, topology,
     cruise_speed_kts : cruise speed in knots for BlueSky
     """
     Path(filename).parent.mkdir(parents=True, exist_ok=True)
-    
+
     if n_drones is not None:
         missions = missions[:n_drones]
-    
+
     lines = []
     lines.append("# ===================================================")
     lines.append("# Decentralized Drone Delivery Simulation")
@@ -72,25 +74,25 @@ def export_scenario(missions, topology,
     lines.append("00:00:00.00>ZOOM 50")
     lines.append("00:00:00.00>TRAILS ON")
     lines.append("")
-    
+
     for mission in missions:
         if not mission.waypoints_3d or len(mission.waypoints_3d) < 2:
             continue
-        
+
         drone_id = f"DR{mission.drone_id:04d}"
         wps = mission.waypoints_3d
-        
+
         # Launch time
         launch_sec = mission.launch_time
         hh = int(launch_sec // 3600)
         mm = int((launch_sec % 3600) // 60)
         ss = launch_sec % 60
         time_str = f"{hh:02d}:{mm:02d}:{ss:05.2f}"
-        
+
         # Starting position
         start_lat, start_lon = xy_to_latlon(wps[0][0], wps[0][1], ref_lat, ref_lon)
         start_alt_ft = wps[1][2] * 3.281  # first waypoint alt in feet
-        
+
         # Initial heading (toward second waypoint)
         if len(wps) > 1:
             dx = wps[1][0] - wps[0][0]
@@ -98,34 +100,34 @@ def export_scenario(missions, topology,
             init_hdg = np.degrees(np.arctan2(dx, dy)) % 360
         else:
             init_hdg = 0
-        
+
         # CRE command: create aircraft
-        lines.append(f"# Drone {mission.drone_id}: "
-                     f"node {mission.origin} → {mission.destination}")
+        lines.append(
+            f"# Drone {mission.drone_id}: node {mission.origin} → {mission.destination}"
+        )
         lines.append(
             f"{time_str}> CRE {drone_id} M600 "
             f"{start_lat:.6f} {start_lon:.6f} {init_hdg:.0f} "
             f"{start_alt_ft:.0f} {cruise_speed_kts:.0f}"
         )
-        
+
         # Set drone type to multirotor
         lines.append(f"{time_str}> {drone_id} VNAV ON")
         lines.append(f"{time_str}> {drone_id} LNAV ON")
-        
+
         # Add waypoints (skip ground positions at start/end)
         for wp_idx, wp in enumerate(wps):
-            if wp[2] <= 0 and wp_idx in [0, len(wps)-1]:
+            if wp[2] <= 0 and wp_idx in [0, len(wps) - 1]:
                 continue  # skip ground
-            
+
             wp_lat, wp_lon = xy_to_latlon(wp[0], wp[1], ref_lat, ref_lon)
             wp_alt_ft = wp[2] * 3.281
-            wp_name = f"{drone_id}WP{wp_idx:02d}"
-            
+
             lines.append(
                 f"{time_str}> ADDWPT {drone_id} {wp_lat:.6f} {wp_lon:.6f} "
                 f"{wp_alt_ft:.0f} {cruise_speed_kts:.0f}"
             )
-        
+
         # Delete drone after mission (approximate end time)
         end_sec = launch_sec + mission.total_flight_time + 30
         hh_e = int(end_sec // 3600)
@@ -134,28 +136,33 @@ def export_scenario(missions, topology,
         end_time = f"{hh_e:02d}:{mm_e:02d}:{ss_e:05.2f}"
         lines.append(f"{end_time}> DEL {drone_id}")
         lines.append("")
-    
+
     # Write file
-    with open(filename, 'w') as f:
-        f.write('\n'.join(lines))
-    
+    with open(filename, "w") as f:
+        f.write("\n".join(lines))
+
     print(f"  BlueSky scenario saved: {filename}")
-    print(f"  {len(missions)} drones, "
-          f"duration ≈ {max(m.launch_time + m.total_flight_time for m in missions if m.waypoints_3d):.0f}s")
+    print(
+        f"  {len(missions)} drones, "
+        f"duration ≈ {max(m.launch_time + m.total_flight_time for m in missions if m.waypoints_3d):.0f}s"
+    )
     print(f"  To run: open BlueSky → PCALL {filename}")
 
 
-def export_conflict_markers(conflicts, topology,
-                            filename: str = "conflicts.scn",
-                            ref_lat: float = REF_LAT,
-                            ref_lon: float = REF_LON):
+def export_conflict_markers(
+    conflicts,
+    topology,
+    filename: str = "conflicts.scn",
+    ref_lat: float = REF_LAT,
+    ref_lon: float = REF_LON,
+):
     """Export conflict locations as visual markers in BlueSky."""
     lines = []
     lines.append("# Conflict markers for BlueSky")
-    
+
     for i, c in enumerate(conflicts):
         # Parse edge key to get approximate location
-        parts = c.edge_key.split('_')
+        parts = c.edge_key.split("_")
         if len(parts) == 2:
             try:
                 n1, n2 = int(parts[0]), int(parts[1])
@@ -164,18 +171,18 @@ def export_conflict_markers(conflicts, topology,
                 mid_x = (p1[0] + p2[0]) / 2
                 mid_y = (p1[1] + p2[1]) / 2
                 lat, lon = xy_to_latlon(mid_x, mid_y, ref_lat, ref_lon)
-                
+
                 t = c.time
                 hh = int(t // 3600)
                 mm = int((t % 3600) // 60)
                 ss = t % 60
                 ts = f"{hh:02d}:{mm:02d}:{ss:05.2f}"
-                
+
                 lines.append(f"{ts}> CIRCLE CONF{i:04d} {lat:.6f} {lon:.6f} 0.05")
             except (ValueError, KeyError):
                 continue
-    
-    with open(filename, 'w') as f:
-        f.write('\n'.join(lines))
-    
+
+    with open(filename, "w") as f:
+        f.write("\n".join(lines))
+
     print(f"  Conflict markers saved: {filename} ({len(conflicts)} conflicts)")

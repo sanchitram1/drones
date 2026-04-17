@@ -381,14 +381,15 @@ def load_orders_csv(orders_path: str | Path, G: nx.Graph) -> pd.DataFrame:
     if unknown_origins or unknown_destinations:
         problems = []
         if unknown_origins:
-            problems.append(
-                f"unknown origin nodes: {', '.join(unknown_origins[:5])}"
-            )
+            problems.append(f"unknown origin nodes: {', '.join(unknown_origins[:5])}")
         if unknown_destinations:
             problems.append(
                 f"unknown destination nodes: {', '.join(unknown_destinations[:5])}"
             )
-        raise ValueError("Orders CSV references nodes not present in the graph: " + "; ".join(problems))
+        raise ValueError(
+            "Orders CSV references nodes not present in the graph: "
+            + "; ".join(problems)
+        )
 
     if not {"orig_x", "orig_y"}.issubset(orders.columns):
         orders["orig_x"] = orders["origin_node"].map(lambda n: G.nodes[n]["x"])
@@ -860,8 +861,7 @@ def build_summary(
 
 def print_summary(summary: Dict[str, float | int | str]):
     print(
-        f"Loaded graph: {summary['graph_nodes']} nodes, "
-        f"{summary['graph_edges']} edges"
+        f"Loaded graph: {summary['graph_nodes']} nodes, {summary['graph_edges']} edges"
     )
     print(f"Orders generated: {summary['orders_generated']}")
     print(

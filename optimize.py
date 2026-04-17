@@ -29,21 +29,24 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
-import networkx as nx
 from dataclasses import dataclass, field
 from collections import defaultdict
 from typing import Dict, List, Optional, Tuple
 from tqdm import tqdm
 
 from config import (
-    ExperimentConfig, GridConfig, AltitudeConfig,
-    DroneConfig, SimConfig,
-    TurnLayerConfig, IntersectionCubeConfig, SpheraboutConfig,
+    ExperimentConfig,
+    AltitudeConfig,
+    DroneConfig,
+    SimConfig,
 )
 from simulator import (
-    GridTopology, SFTopology,
-    TurnProtocol, TurnLayerProtocol, IntersectionCubeProtocol, SpheraboutProtocol,
-    MissionPlanner,
+    GridTopology,
+    SFTopology,
+    TurnProtocol,
+    TurnLayerProtocol,
+    IntersectionCubeProtocol,
+    SpheraboutProtocol,
 )
 
 
@@ -51,36 +54,38 @@ from simulator import (
 # 1.  RESULT DATACLASS
 # ══════════════════════════════════════════════════════════════════════
 
+
 @dataclass
 class OptimizationResult:
     """
     Full result of the throughput optimization for one configuration.
     All λ values are in drones/second; multiply by T to get drones/window.
     """
+
     topology: str
     turning_protocol: str
 
     # ── closed-form bounds from each constraint ──────────────────────
-    lambda_conflict:     float = 0.0   # C1: √(K_max / Q)
-    lambda_intersection: float = 0.0   # C2: min_v 1/(ρ̄_v · τ̄_p(v))
-    lambda_headway:      float = 0.0   # C3: min_{e,a} (v_c/h_sep) / μ̄_{e,a}
-    lambda_zone:         float = np.inf  # C4: min_z cap_z/T_z  (inf if disabled)
+    lambda_conflict: float = 0.0  # C1: √(K_max / Q)
+    lambda_intersection: float = 0.0  # C2: min_v 1/(ρ̄_v · τ̄_p(v))
+    lambda_headway: float = 0.0  # C3: min_{e,a} (v_c/h_sep) / μ̄_{e,a}
+    lambda_zone: float = np.inf  # C4: min_z cap_z/T_z  (inf if disabled)
 
-    lambda_star: float = 0.0           # optimal = min of all bounds
-    binding_constraint: str = ""       # which constraint is tight at λ*
+    lambda_star: float = 0.0  # optimal = min of all bounds
+    binding_constraint: str = ""  # which constraint is tight at λ*
 
     # ── diagnostic coefficients ──────────────────────────────────────
-    Q: float = 0.0                     # conflict load coefficient
+    Q: float = 0.0  # conflict load coefficient
     K_max: float = 0.0
-    bottleneck_edge: Optional[Tuple]   = None   # (edge, altitude) tightest on C3
-    bottleneck_node: Optional[int]     = None   # node tightest on C2
-    bottleneck_zone: Optional[Tuple]   = None   # zone tightest on C4
+    bottleneck_edge: Optional[Tuple] = None  # (edge, altitude) tightest on C3
+    bottleneck_node: Optional[int] = None  # node tightest on C2
+    bottleneck_zone: Optional[Tuple] = None  # zone tightest on C4
 
     # ── distribution info ────────────────────────────────────────────
     n_od_sampled: int = 0
     mean_path_length_m: float = 0.0
     mean_turns_per_path: float = 0.0
-    n_active_edge_alt_lanes: int = 0    # lanes with μ̄ > 0
+    n_active_edge_alt_lanes: int = 0  # lanes with μ̄ > 0
     n_turning_nodes: int = 0
 
     # ── per-band utilisation (share of total flow, dict band→fraction) ─
@@ -111,6 +116,7 @@ class OptimizationResult:
 # 2.  DEMAND MODEL
 # ══════════════════════════════════════════════════════════════════════
 
+
 class DemandModel:
     """
     Builds an OD demand distribution d_{ij} and samples weighted OD pairs.
@@ -125,10 +131,10 @@ class DemandModel:
         self,
         topology,
         mode: str = "gravity",
-        beta: float = 1e-4,          # distance decay (1/m units)
+        beta: float = 1e-4,  # distance decay (1/m units)
         rng: Optional[np.random.Generator] = None,
-        origin_weights: Optional[Dict] = None,   # node→weight (restaurants)
-        dest_weights:   Optional[Dict] = None,   # node→weight (population)
+        origin_weights: Optional[Dict] = None,  # node→weight (restaurants)
+        dest_weights: Optional[Dict] = None,  # node→weight (population)
     ):
         self.topology = topology
         self.mode = mode
@@ -150,7 +156,7 @@ class DemandModel:
 
         # Normalise weights to avoid numerical overflow
         self.origin_w = self.origin_w / (self.origin_w.sum() + 1e-12)
-        self.dest_w   = self.dest_w   / (self.dest_w.sum()   + 1e-12)
+        self.dest_w = self.dest_w / (self.dest_w.sum() + 1e-12)
 
     # ── precompute pairwise gravity weights ──────────────────────────
     def _gravity_pair_weights(self, origins_idx, dests_idx) -> np.ndarray:
@@ -214,6 +220,7 @@ class DemandModel:
 # 3.  PATH DISTRIBUTION  — μ̄, ρ̄, turn info
 # ══════════════════════════════════════════════════════════════════════
 
+
 @dataclass
 class PathDistributionStats:
     """
@@ -225,12 +232,19 @@ class PathDistributionStats:
                                              entry_alt, exit_alt)
                                    — used to compute average τ̄_p(v)
     """
-    edge_alt_load:  Dict[str, Dict[float, float]]     = field(default_factory=lambda: defaultdict(lambda: defaultdict(float)))
-    turn_rate:      Dict[int, float]                  = field(default_factory=lambda: defaultdict(float))
-    turn_events:    Dict[int, List[Tuple]]            = field(default_factory=lambda: defaultdict(list))
-    path_lengths_m: List[float]                       = field(default_factory=list)
-    turns_per_path: List[int]                         = field(default_factory=list)
-    zone_transit:   Dict[Tuple[int,int], float]       = field(default_factory=lambda: defaultdict(float))  # zone→fraction
+
+    edge_alt_load: Dict[str, Dict[float, float]] = field(
+        default_factory=lambda: defaultdict(lambda: defaultdict(float))
+    )
+    turn_rate: Dict[int, float] = field(default_factory=lambda: defaultdict(float))
+    turn_events: Dict[int, List[Tuple]] = field(
+        default_factory=lambda: defaultdict(list)
+    )
+    path_lengths_m: List[float] = field(default_factory=list)
+    turns_per_path: List[int] = field(default_factory=list)
+    zone_transit: Dict[Tuple[int, int], float] = field(
+        default_factory=lambda: defaultdict(float)
+    )  # zone→fraction
 
 
 class PathDistributionBuilder:
@@ -244,12 +258,12 @@ class PathDistributionBuilder:
         topology,
         alt_cfg: AltitudeConfig,
         n_bands: int = 4,
-        zone_controller=None,           # optional ZoneAdmissionController
+        zone_controller=None,  # optional ZoneAdmissionController
     ):
-        self.topo     = topology
-        self.alt      = alt_cfg
-        self.n_bands  = n_bands
-        self.zones    = zone_controller
+        self.topo = topology
+        self.alt = alt_cfg
+        self.n_bands = n_bands
+        self.zones = zone_controller
 
     def build(
         self,
@@ -260,30 +274,31 @@ class PathDistributionBuilder:
         Walk each OD pair's shortest path and accumulate statistics.
         Each path has equal weight (1 / len(od_pairs)).
         """
-        stats   = PathDistributionStats()
-        w       = 1.0 / len(od_pairs)   # uniform weight per sample
-        topo    = self.topo
+        stats = PathDistributionStats()
+        w = 1.0 / len(od_pairs)  # uniform weight per sample
+        topo = self.topo
 
-        for (orig, dest) in tqdm(od_pairs, desc="Building path distribution",
-                                  disable=not verbose):
+        for orig, dest in tqdm(
+            od_pairs, desc="Building path distribution", disable=not verbose
+        ):
             path = topo.shortest_path(orig, dest)
             if len(path) < 2:
                 continue
 
-            headings   = []
-            altitudes  = []
+            headings = []
+            altitudes = []
             directions = []
-            lengths    = []
-            n_turns    = 0
-            total_len  = 0.0
+            lengths = []
+            n_turns = 0
+            total_len = 0.0
 
             for s in range(len(path) - 1):
-                u, v   = path[s], path[s + 1]
-                h      = topo.compute_heading(u, v)
-                alt    = self.alt.get_altitude(h, self.n_bands)
-                direc  = self.alt.get_direction_label(h, self.n_bands)
+                u, v = path[s], path[s + 1]
+                h = topo.compute_heading(u, v)
+                alt = self.alt.get_altitude(h, self.n_bands)
+                direc = self.alt.get_direction_label(h, self.n_bands)
                 pu, pv = topo.get_position(u), topo.get_position(v)
-                le     = np.hypot(pv[0] - pu[0], pv[1] - pu[1])
+                le = np.hypot(pv[0] - pu[0], pv[1] - pu[1])
 
                 headings.append(h)
                 altitudes.append(alt)
@@ -292,12 +307,12 @@ class PathDistributionBuilder:
                 total_len += le
 
                 # μ̄_{e,a}: accumulate edge-altitude load
-                ekey = f"{min(u,v)}_{max(u,v)}"
+                ekey = f"{min(u, v)}_{max(u, v)}"
                 stats.edge_alt_load[ekey][alt] += w
 
                 # Zone transit
                 if self.zones is not None:
-                    pos  = topo.get_position(u)
+                    pos = topo.get_position(u)
                     zone = self.zones.get_zone(*pos)
                     stats.zone_transit[zone] += w
 
@@ -307,10 +322,14 @@ class PathDistributionBuilder:
                     n_turns += 1
                     node = path[s]
                     stats.turn_rate[node] += w
-                    stats.turn_events[node].append((
-                        headings[s - 1], headings[s],
-                        altitudes[s - 1], altitudes[s],
-                    ))
+                    stats.turn_events[node].append(
+                        (
+                            headings[s - 1],
+                            headings[s],
+                            altitudes[s - 1],
+                            altitudes[s],
+                        )
+                    )
 
             stats.path_lengths_m.append(total_len)
             stats.turns_per_path.append(n_turns)
@@ -322,6 +341,7 @@ class PathDistributionBuilder:
 # 4.  CONSTRAINT EVALUATORS
 # ══════════════════════════════════════════════════════════════════════
 
+
 class ConstraintEvaluator:
     """
     Evaluates the four throughput bounds given a PathDistributionStats
@@ -330,24 +350,24 @@ class ConstraintEvaluator:
 
     def __init__(
         self,
-        dist:         PathDistributionStats,
+        dist: PathDistributionStats,
         topology,
         turn_protocol: TurnProtocol,
-        drone_cfg:    DroneConfig,
-        sim_cfg:      SimConfig,
-        alt_cfg:      AltitudeConfig,
-        n_bands:      int = 4,
-        K_max:        float = 50.0,
-        zone_caps:    Optional[Dict[Tuple[int,int], int]] = None,
+        drone_cfg: DroneConfig,
+        sim_cfg: SimConfig,
+        alt_cfg: AltitudeConfig,
+        n_bands: int = 4,
+        K_max: float = 50.0,
+        zone_caps: Optional[Dict[Tuple[int, int], int]] = None,
     ):
-        self.dist     = dist
-        self.topo     = topology
-        self.proto    = turn_protocol
-        self.drone    = drone_cfg
-        self.sim      = sim_cfg
-        self.alt      = alt_cfg
-        self.n_bands  = n_bands
-        self.K_max    = K_max
+        self.dist = dist
+        self.topo = topology
+        self.proto = turn_protocol
+        self.drone = drone_cfg
+        self.sim = sim_cfg
+        self.alt = alt_cfg
+        self.n_bands = n_bands
+        self.K_max = K_max
         self.zone_caps = zone_caps or {}
 
     # ── C1: corridor conflict  λ² · Q ≤ K_max ───────────────────────
@@ -361,35 +381,35 @@ class ConstraintEvaluator:
         on a single lane: E[conflicts] ≈ T·(λ·μ̄)²·τ_e/2,
         where τ_e = l_e/v_c is edge traversal time.
         """
-        T   = self.sim.launch_window
+        T = self.sim.launch_window
         v_c = self.drone.cruise_speed
 
-        Q              = 0.0
-        worst_key      = None
-        worst_contrib  = 0.0
+        Q = 0.0
+        worst_key = None
+        worst_contrib = 0.0
 
         for ekey, alt_loads in self.dist.edge_alt_load.items():
             # Recover edge length from topology
             try:
                 u_str, v_str = ekey.split("_")
                 u, v = int(u_str), int(v_str)
-                pu   = self.topo.get_position(u)
-                pv   = self.topo.get_position(v)
-                le   = np.hypot(pv[0] - pu[0], pv[1] - pu[1])
+                pu = self.topo.get_position(u)
+                pv = self.topo.get_position(v)
+                le = np.hypot(pv[0] - pu[0], pv[1] - pu[1])
             except (ValueError, KeyError):
                 # For OSMnx node IDs that are large ints; split on '_' may give
                 # more than 2 parts if node IDs contain underscores — handle gracefully
-                parts = ekey.split("_")
-                le    = 200.0   # fallback: default block length
+                ekey.split("_")
+                le = 200.0  # fallback: default block length
 
             tau_e = le / v_c
 
             for alt, mu_bar in alt_loads.items():
-                contrib = (T / 2.0) * (mu_bar ** 2) * tau_e
+                contrib = (T / 2.0) * (mu_bar**2) * tau_e
                 Q += contrib
                 if contrib > worst_contrib:
                     worst_contrib = contrib
-                    worst_key     = (ekey, alt)
+                    worst_key = (ekey, alt)
 
         return Q, worst_key, worst_contrib
 
@@ -408,15 +428,15 @@ class ConstraintEvaluator:
           τ̄_p(v) = mean turn time over all observed (θ_in, θ_out, alt_in, alt_out)
           bound_v = 1 / (ρ̄_v · τ̄_p(v))
         """
-        bounds   = {}
-        min_b    = np.inf
-        worst_v  = None
+        bounds = {}
+        min_b = np.inf
+        worst_v = None
 
         for node, rho_bar in self.dist.turn_rate.items():
             if rho_bar < 1e-12:
                 continue
 
-            events  = self.dist.turn_events[node]
+            events = self.dist.turn_events[node]
             if not events:
                 continue
 
@@ -436,7 +456,7 @@ class ConstraintEvaluator:
             bounds[node] = b
 
             if b < min_b:
-                min_b   = b
+                min_b = b
                 worst_v = node
 
         return (min_b if min_b < np.inf else np.inf), worst_v, bounds
@@ -451,9 +471,9 @@ class ConstraintEvaluator:
         v_c / h_sep = 15/50 = 0.3 drone arrivals per second.
         """
         cap_per_lane = self.drone.cruise_speed / self.drone.min_separation_h
-        bounds       = {}
-        min_b        = np.inf
-        worst_lane   = None
+        bounds = {}
+        min_b = np.inf
+        worst_lane = None
 
         for ekey, alt_loads in self.dist.edge_alt_load.items():
             for alt, mu_bar in alt_loads.items():
@@ -462,7 +482,7 @@ class ConstraintEvaluator:
                 b = cap_per_lane / mu_bar
                 bounds[(ekey, alt)] = b
                 if b < min_b:
-                    min_b      = b
+                    min_b = b
                     worst_lane = (ekey, alt)
 
         return (min_b if min_b < np.inf else np.inf), worst_lane, bounds
@@ -476,9 +496,9 @@ class ConstraintEvaluator:
         if not self.zone_caps:
             return np.inf, None, {}
 
-        bounds   = {}
-        min_b    = np.inf
-        worst_z  = None
+        bounds = {}
+        min_b = np.inf
+        worst_z = None
 
         for zone, T_z in self.dist.zone_transit.items():
             cap = self.zone_caps.get(zone)
@@ -490,7 +510,7 @@ class ConstraintEvaluator:
             b = float(cap) / T_z
             bounds[zone] = b
             if b < min_b:
-                min_b   = b
+                min_b = b
                 worst_z = zone
 
         return (min_b if min_b < np.inf else np.inf), worst_z, bounds
@@ -500,18 +520,18 @@ class ConstraintEvaluator:
         """Compute all bounds and return the OptimizationResult."""
         Q, worst_edge, _ = self.compute_Q()
 
-        lc1             = self.lambda_c1(Q)
+        lc1 = self.lambda_c1(Q)
         lc2, worst_node, _ = self.compute_intersection_bounds()
         lc3, worst_lane, edge_bounds = self.compute_headway_bounds()
         lc4, worst_zone, _ = self.compute_zone_bounds()
 
         candidates = {
-            "C1 corridor conflicts":     lc1,
-            "C2 intersection capacity":  lc2,
-            "C3 minimum headway":        lc3,
+            "C1 corridor conflicts": lc1,
+            "C2 intersection capacity": lc2,
+            "C3 minimum headway": lc3,
             "C4 zone admission control": lc4,
         }
-        binding    = min(candidates, key=candidates.get)
+        binding = min(candidates, key=candidates.get)
         lambda_star = candidates[binding]
 
         # Altitude band utilisation
@@ -521,44 +541,48 @@ class ConstraintEvaluator:
             for alt, mu in alt_loads.items():
                 label = self._alt_to_label(alt)
                 band_totals[label] += mu
-                grand_total        += mu
+                grand_total += mu
         if grand_total > 0:
             alt_share = {k: v / grand_total for k, v in band_totals.items()}
         else:
             alt_share = {}
 
         res = OptimizationResult(
-            topology          = "—",   # filled in by ThroughputOptimizer
-            turning_protocol  = "—",
-            lambda_conflict   = lc1,
-            lambda_intersection = lc2,
-            lambda_headway    = lc3,
-            lambda_zone       = lc4,
-            lambda_star       = lambda_star,
-            binding_constraint = binding,
-            Q                 = Q,
-            K_max             = self.K_max,
-            bottleneck_edge   = worst_edge,
-            bottleneck_node   = worst_node,
-            bottleneck_zone   = worst_zone,
-            n_od_sampled      = len(self.dist.path_lengths_m),
-            mean_path_length_m = float(np.mean(self.dist.path_lengths_m)) if self.dist.path_lengths_m else 0.0,
-            mean_turns_per_path = float(np.mean(self.dist.turns_per_path)) if self.dist.turns_per_path else 0.0,
-            n_active_edge_alt_lanes = sum(
+            topology="—",  # filled in by ThroughputOptimizer
+            turning_protocol="—",
+            lambda_conflict=lc1,
+            lambda_intersection=lc2,
+            lambda_headway=lc3,
+            lambda_zone=lc4,
+            lambda_star=lambda_star,
+            binding_constraint=binding,
+            Q=Q,
+            K_max=self.K_max,
+            bottleneck_edge=worst_edge,
+            bottleneck_node=worst_node,
+            bottleneck_zone=worst_zone,
+            n_od_sampled=len(self.dist.path_lengths_m),
+            mean_path_length_m=float(np.mean(self.dist.path_lengths_m))
+            if self.dist.path_lengths_m
+            else 0.0,
+            mean_turns_per_path=float(np.mean(self.dist.turns_per_path))
+            if self.dist.turns_per_path
+            else 0.0,
+            n_active_edge_alt_lanes=sum(
                 len(al) for al in self.dist.edge_alt_load.values()
             ),
-            n_turning_nodes   = len(self.dist.turn_rate),
-            altitude_band_share = alt_share,
+            n_turning_nodes=len(self.dist.turn_rate),
+            altitude_band_share=alt_share,
         )
         return res
 
     def _alt_to_label(self, alt: float) -> str:
         """Reverse-map altitude value to direction label."""
         mapping = {
-            self.alt.north:     "N",
-            self.alt.south:     "S",
-            self.alt.east:      "E",
-            self.alt.west:      "W",
+            self.alt.north: "N",
+            self.alt.south: "S",
+            self.alt.east: "E",
+            self.alt.west: "W",
             self.alt.northeast: "NE",
             self.alt.southwest: "SW",
             self.alt.northwest: "NW",
@@ -570,6 +594,7 @@ class ConstraintEvaluator:
 # ══════════════════════════════════════════════════════════════════════
 # 5.  TOP-LEVEL OPTIMIZER
 # ══════════════════════════════════════════════════════════════════════
+
 
 class ThroughputOptimizer:
     """
@@ -596,9 +621,9 @@ class ThroughputOptimizer:
         if config.use_sf_data:
             self._setup_sf_topology()
         else:
-            n_bands       = 8 if config.topology == "diagonal_overlay" else 4
+            n_bands = 8 if config.topology == "diagonal_overlay" else 4
             self.topology = GridTopology(config.grid, config.topology)
-            self.n_bands  = n_bands
+            self.n_bands = n_bands
 
         # Build turning protocol
         self.turn_protocol = self._make_protocol(config.turning_protocol)
@@ -606,13 +631,16 @@ class ThroughputOptimizer:
     # ── topology helpers ──────────────────────────────────────────────
     def _setup_sf_topology(self):
         from data_loader import (
-            load_sf_street_network, load_sf_buildings, compute_corridor_clearances
+            load_sf_street_network,
+            load_sf_buildings,
+            compute_corridor_clearances,
         )
-        G          = load_sf_street_network(self.cfg.sf)
-        buildings  = load_sf_buildings(self.cfg.sf)
+
+        G = load_sf_street_network(self.cfg.sf)
+        buildings = load_sf_buildings(self.cfg.sf)
         clearances = compute_corridor_clearances(buildings, G)
         self.topology = SFTopology(G, clearances)
-        self.n_bands  = 8 if self.cfg.topology == "diagonal_overlay" else 4
+        self.n_bands = 8 if self.cfg.topology == "diagonal_overlay" else 4
 
     def _make_protocol(self, name: str) -> TurnProtocol:
         if name == "turn_layer":
@@ -637,37 +665,37 @@ class ThroughputOptimizer:
         self,
         mode: str = "gravity",
         origin_weights: Optional[Dict] = None,
-        dest_weights:   Optional[Dict] = None,
+        dest_weights: Optional[Dict] = None,
         beta: float = 1e-4,
     ) -> DemandModel:
         return DemandModel(
             self.topology,
-            mode           = mode,
-            beta           = beta,
-            rng            = self.rng,
-            origin_weights = origin_weights,
-            dest_weights   = dest_weights,
+            mode=mode,
+            beta=beta,
+            rng=self.rng,
+            origin_weights=origin_weights,
+            dest_weights=dest_weights,
         )
 
     # ── zone caps (pass-through from sim config) ──────────────────────
     def _get_zone_caps(self, zone_controller) -> Dict:
         if zone_controller is None or not self.cfg.sim.enable_admission_control:
             return {}
-        cap  = self.cfg.sim.zone_capacity
-        n    = zone_controller.n_zones
+        cap = self.cfg.sim.zone_capacity
+        n = zone_controller.n_zones
         caps = {(r, c): cap for r in range(n) for c in range(n)}
         return caps
 
     # ── main optimise call ────────────────────────────────────────────
     def optimize(
         self,
-        n_od_samples:   int   = 2000,
-        K_max:          float = 50.0,
-        demand_mode:    str   = "gravity",
+        n_od_samples: int = 2000,
+        K_max: float = 50.0,
+        demand_mode: str = "gravity",
         origin_weights: Optional[Dict] = None,
-        dest_weights:   Optional[Dict] = None,
-        beta:           float = 1e-4,
-        verbose:        bool  = True,
+        dest_weights: Optional[Dict] = None,
+        beta: float = 1e-4,
+        verbose: bool = True,
     ) -> OptimizationResult:
         """
         Full optimisation pipeline for the current (topology, protocol) config.
@@ -683,11 +711,15 @@ class ThroughputOptimizer:
         verbose       : print progress bars and result summary
         """
         if verbose:
-            print(f"\nOptimising  topology={self.cfg.topology}  "
-                  f"protocol={self.cfg.turning_protocol}")
+            print(
+                f"\nOptimising  topology={self.cfg.topology}  "
+                f"protocol={self.cfg.turning_protocol}"
+            )
 
         # 1. Sample OD pairs from demand model
-        demand = self.build_demand_model(demand_mode, origin_weights, dest_weights, beta)
+        demand = self.build_demand_model(
+            demand_mode, origin_weights, dest_weights, beta
+        )
         od_pairs = demand.sample(n_od_samples)
 
         # 2. Build path distribution statistics
@@ -700,20 +732,20 @@ class ThroughputOptimizer:
 
         # 3. Evaluate constraints and solve
         evaluator = ConstraintEvaluator(
-            dist          = dist,
-            topology      = self.topology,
-            turn_protocol = self.turn_protocol,
-            drone_cfg     = self.cfg.drone,
-            sim_cfg       = self.cfg.sim,
-            alt_cfg       = self.cfg.altitude,
-            n_bands       = self.n_bands,
-            K_max         = K_max,
-            zone_caps     = {},     # zone caps unused unless enabled via config
+            dist=dist,
+            topology=self.topology,
+            turn_protocol=self.turn_protocol,
+            drone_cfg=self.cfg.drone,
+            sim_cfg=self.cfg.sim,
+            alt_cfg=self.cfg.altitude,
+            n_bands=self.n_bands,
+            K_max=K_max,
+            zone_caps={},  # zone caps unused unless enabled via config
         )
         result = evaluator.solve()
 
         # Tag result with config info
-        result.topology         = self.cfg.topology
+        result.topology = self.cfg.topology
         result.turning_protocol = self.cfg.turning_protocol
 
         if verbose:
@@ -726,16 +758,17 @@ class ThroughputOptimizer:
 # 6.  MULTI-CONFIG COMPARISON
 # ══════════════════════════════════════════════════════════════════════
 
+
 def compare_configs(
-    topologies:  List[str]   = ("grid", "diagonal_overlay"),
-    protocols:   List[str]   = ("turn_layer", "intersection_cube", "sphereabout"),
-    n_od_samples: int        = 2000,
-    K_max:        float      = 50.0,
-    demand_mode:  str        = "gravity",
+    topologies: List[str] = ("grid", "diagonal_overlay"),
+    protocols: List[str] = ("turn_layer", "intersection_cube", "sphereabout"),
+    n_od_samples: int = 2000,
+    K_max: float = 50.0,
+    demand_mode: str = "gravity",
     origin_weights: Optional[Dict] = None,
-    dest_weights:   Optional[Dict] = None,
-    base_config:  Optional[ExperimentConfig] = None,
-    verbose:      bool       = True,
+    dest_weights: Optional[Dict] = None,
+    base_config: Optional[ExperimentConfig] = None,
+    verbose: bool = True,
 ) -> pd.DataFrame:
     """
     Run the optimizer for every (topology, protocol) pair and return a
@@ -767,47 +800,53 @@ def compare_configs(
     for topo in topologies:
         for proto in protocols:
             # Clone config with this (topo, proto) combination
-            cfg                  = ExperimentConfig(
-                grid             = base_config.grid,
-                altitude         = base_config.altitude,
-                drone            = base_config.drone,
-                turn_layer       = base_config.turn_layer,
-                cube             = base_config.cube,
-                sphereabout      = base_config.sphereabout,
-                sim              = base_config.sim,
-                sf               = base_config.sf,
-                topology         = topo,
-                turning_protocol = proto,
-                use_sf_data      = base_config.use_sf_data,
+            cfg = ExperimentConfig(
+                grid=base_config.grid,
+                altitude=base_config.altitude,
+                drone=base_config.drone,
+                turn_layer=base_config.turn_layer,
+                cube=base_config.cube,
+                sphereabout=base_config.sphereabout,
+                sim=base_config.sim,
+                sf=base_config.sf,
+                topology=topo,
+                turning_protocol=proto,
+                use_sf_data=base_config.use_sf_data,
             )
 
             optimizer = ThroughputOptimizer(cfg)
-            result    = optimizer.optimize(
-                n_od_samples   = n_od_samples,
-                K_max          = K_max,
-                demand_mode    = demand_mode,
-                origin_weights = origin_weights,
-                dest_weights   = dest_weights,
-                verbose        = verbose,
+            result = optimizer.optimize(
+                n_od_samples=n_od_samples,
+                K_max=K_max,
+                demand_mode=demand_mode,
+                origin_weights=origin_weights,
+                dest_weights=dest_weights,
+                verbose=verbose,
             )
 
-            rows.append({
-                "topology":            result.topology,
-                "protocol":            result.turning_protocol,
-                "lambda_star":         round(result.lambda_star,    4),
-                "throughput_hr":       round(result.throughput_per_hour(), 1),
-                "binding_constraint":  result.binding_constraint,
-                "lambda_conflict":     round(result.lambda_conflict,     4),
-                "lambda_intersection": round(result.lambda_intersection, 4),
-                "lambda_headway":      round(result.lambda_headway,      4),
-                "Q":                   round(result.Q,                   6),
-                "mean_path_m":         round(result.mean_path_length_m,  1),
-                "mean_turns":          round(result.mean_turns_per_path, 2),
-                "n_turning_nodes":     result.n_turning_nodes,
-                "n_lanes":             result.n_active_edge_alt_lanes,
-            })
+            rows.append(
+                {
+                    "topology": result.topology,
+                    "protocol": result.turning_protocol,
+                    "lambda_star": round(result.lambda_star, 4),
+                    "throughput_hr": round(result.throughput_per_hour(), 1),
+                    "binding_constraint": result.binding_constraint,
+                    "lambda_conflict": round(result.lambda_conflict, 4),
+                    "lambda_intersection": round(result.lambda_intersection, 4),
+                    "lambda_headway": round(result.lambda_headway, 4),
+                    "Q": round(result.Q, 6),
+                    "mean_path_m": round(result.mean_path_length_m, 1),
+                    "mean_turns": round(result.mean_turns_per_path, 2),
+                    "n_turning_nodes": result.n_turning_nodes,
+                    "n_lanes": result.n_active_edge_alt_lanes,
+                }
+            )
 
-    df = pd.DataFrame(rows).sort_values("lambda_star", ascending=False).reset_index(drop=True)
+    df = (
+        pd.DataFrame(rows)
+        .sort_values("lambda_star", ascending=False)
+        .reset_index(drop=True)
+    )
     return df
 
 
@@ -815,12 +854,13 @@ def compare_configs(
 # 7.  SENSITIVITY ANALYSIS
 # ══════════════════════════════════════════════════════════════════════
 
+
 def sensitivity_analysis(
-    config:        ExperimentConfig,
-    K_max_values:  List[float] = (10, 25, 50, 100, 200),
-    n_od_samples:  int         = 1500,
-    demand_mode:   str         = "gravity",
-    verbose:       bool        = False,
+    config: ExperimentConfig,
+    K_max_values: List[float] = (10, 25, 50, 100, 200),
+    n_od_samples: int = 1500,
+    demand_mode: str = "gravity",
+    verbose: bool = False,
 ) -> pd.DataFrame:
     """
     How does λ* change as the conflict budget K_max varies?
@@ -830,8 +870,8 @@ def sensitivity_analysis(
     Returns a DataFrame with (K_max, lambda_star, binding_constraint, lambda_conflict).
     """
     optimizer = ThroughputOptimizer(config)
-    demand    = optimizer.build_demand_model(demand_mode)
-    od_pairs  = demand.sample(n_od_samples)
+    demand = optimizer.build_demand_model(demand_mode)
+    od_pairs = demand.sample(n_od_samples)
 
     builder = PathDistributionBuilder(
         optimizer.topology, config.altitude, optimizer.n_bands
@@ -840,35 +880,41 @@ def sensitivity_analysis(
 
     # Compute protocol-independent stats once
     dummy_eval = ConstraintEvaluator(
-        dist          = dist,
-        topology      = optimizer.topology,
-        turn_protocol = optimizer.turn_protocol,
-        drone_cfg     = config.drone,
-        sim_cfg       = config.sim,
-        alt_cfg       = config.altitude,
-        n_bands       = optimizer.n_bands,
-        K_max         = 1.0,   # placeholder
+        dist=dist,
+        topology=optimizer.topology,
+        turn_protocol=optimizer.turn_protocol,
+        drone_cfg=config.drone,
+        sim_cfg=config.sim,
+        alt_cfg=config.altitude,
+        n_bands=optimizer.n_bands,
+        K_max=1.0,  # placeholder
     )
-    Q, _, _           = dummy_eval.compute_Q()
-    lc2, _, _         = dummy_eval.compute_intersection_bounds()
-    lc3, _, _         = dummy_eval.compute_headway_bounds()
-    lc4, _, _         = dummy_eval.compute_zone_bounds()
+    Q, _, _ = dummy_eval.compute_Q()
+    lc2, _, _ = dummy_eval.compute_intersection_bounds()
+    lc3, _, _ = dummy_eval.compute_headway_bounds()
+    lc4, _, _ = dummy_eval.compute_zone_bounds()
 
     rows = []
     for K in K_max_values:
-        lc1       = np.sqrt(K / Q) if Q > 1e-12 else np.inf
-        lstar     = min(lc1, lc2, lc3, lc4)
-        binding   = {lc1: "C1 corridor", lc2: "C2 intersection",
-                     lc3: "C3 headway",  lc4: "C4 zone"}[lstar]
-        rows.append({
-            "K_max":               K,
-            "lambda_star":         round(lstar, 4),
-            "throughput_hr":       round(lstar * 3600, 1),
-            "binding_constraint":  binding,
-            "lambda_conflict":     round(lc1, 4),
-            "lambda_intersection": round(lc2, 4),
-            "lambda_headway":      round(lc3, 4),
-        })
+        lc1 = np.sqrt(K / Q) if Q > 1e-12 else np.inf
+        lstar = min(lc1, lc2, lc3, lc4)
+        binding = {
+            lc1: "C1 corridor",
+            lc2: "C2 intersection",
+            lc3: "C3 headway",
+            lc4: "C4 zone",
+        }[lstar]
+        rows.append(
+            {
+                "K_max": K,
+                "lambda_star": round(lstar, 4),
+                "throughput_hr": round(lstar * 3600, 1),
+                "binding_constraint": binding,
+                "lambda_conflict": round(lc1, 4),
+                "lambda_intersection": round(lc2, 4),
+                "lambda_headway": round(lc3, 4),
+            }
+        )
         if verbose:
             print(f"  K_max={K:6.1f}  λ*={lstar:.4f}  binding={binding}")
 
@@ -885,57 +931,80 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Analytical throughput optimizer for drone airspace."
     )
-    parser.add_argument("--topology",  default="grid",
-                        choices=["grid", "diagonal_overlay"])
-    parser.add_argument("--protocol",  default="turn_layer",
-                        choices=["turn_layer", "intersection_cube", "sphereabout"])
-    parser.add_argument("--K-max",     type=float, default=50.0,
-                        help="Maximum tolerated conflicts per launch window")
-    parser.add_argument("--samples",   type=int,   default=2000,
-                        help="Number of OD pairs sampled for path distribution")
-    parser.add_argument("--demand",    default="gravity",
-                        choices=["gravity", "uniform"],
-                        help="Demand model: gravity (SF pop-weighted) or uniform")
-    parser.add_argument("--compare",   action="store_true",
-                        help="Compare all topology × protocol combinations")
-    parser.add_argument("--sensitivity", action="store_true",
-                        help="Sweep K_max for the chosen configuration")
+    parser.add_argument(
+        "--topology", default="grid", choices=["grid", "diagonal_overlay"]
+    )
+    parser.add_argument(
+        "--protocol",
+        default="turn_layer",
+        choices=["turn_layer", "intersection_cube", "sphereabout"],
+    )
+    parser.add_argument(
+        "--K-max",
+        type=float,
+        default=50.0,
+        help="Maximum tolerated conflicts per launch window",
+    )
+    parser.add_argument(
+        "--samples",
+        type=int,
+        default=2000,
+        help="Number of OD pairs sampled for path distribution",
+    )
+    parser.add_argument(
+        "--demand",
+        default="gravity",
+        choices=["gravity", "uniform"],
+        help="Demand model: gravity (SF pop-weighted) or uniform",
+    )
+    parser.add_argument(
+        "--compare",
+        action="store_true",
+        help="Compare all topology × protocol combinations",
+    )
+    parser.add_argument(
+        "--sensitivity",
+        action="store_true",
+        help="Sweep K_max for the chosen configuration",
+    )
     args = parser.parse_args()
 
     base_cfg = ExperimentConfig(
-        topology         = args.topology,
-        turning_protocol = args.protocol,
+        topology=args.topology,
+        turning_protocol=args.protocol,
     )
 
     if args.compare:
         print("\n=== Comparing all configurations ===")
         df = compare_configs(
-            K_max        = args.K_max,
-            n_od_samples = args.samples,
-            demand_mode  = args.demand,
-            base_config  = base_cfg,
+            K_max=args.K_max,
+            n_od_samples=args.samples,
+            demand_mode=args.demand,
+            base_config=base_cfg,
         )
         print("\n" + df.to_string(index=False))
 
     elif args.sensitivity:
-        print(f"\n=== Sensitivity analysis: K_max sweep "
-              f"({args.topology} / {args.protocol}) ===")
+        print(
+            f"\n=== Sensitivity analysis: K_max sweep "
+            f"({args.topology} / {args.protocol}) ==="
+        )
         df = sensitivity_analysis(
-            config       = base_cfg,
-            n_od_samples = args.samples,
-            demand_mode  = args.demand,
-            verbose      = True,
+            config=base_cfg,
+            n_od_samples=args.samples,
+            demand_mode=args.demand,
+            verbose=True,
         )
         print("\n" + df.to_string(index=False))
 
     else:
         optimizer = ThroughputOptimizer(base_cfg)
-        result    = optimizer.optimize(
-            n_od_samples = args.samples,
-            K_max        = args.K_max,
-            demand_mode  = args.demand,
-            verbose      = True,
+        result = optimizer.optimize(
+            n_od_samples=args.samples,
+            K_max=args.K_max,
+            demand_mode=args.demand,
+            verbose=True,
         )
         print("\nAltitude band utilisation:")
         for band, share in sorted(result.altitude_band_share.items()):
-            print(f"  {band:3s}  {share*100:.1f}%")
+            print(f"  {band:3s}  {share * 100:.1f}%")
