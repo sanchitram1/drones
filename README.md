@@ -1,14 +1,14 @@
 # Decentralized Drone Delivery Airspace Simulation
 
-**IEOR 290 — Transportation Analytics, UC Berkeley, Spring 2026**
-**Team:** Sanchit Arvind, Constantin Ertel, JP Schuchter, Shreya Krishnan
+**IEOR 290 — Transportation Analytics, UC Berkeley, Spring 2026** **Team:** Sanchit
+Arvind, Constantin Ertel, JP Schuchter, Shreya Krishnan
 
 ---
 
 ## Project Overview
 
-This project investigates **decentralized drone delivery airspace design** — how
-to structure urban airspace so that delivery drones can operate safely without a
+This project investigates **decentralized drone delivery airspace design** — how to
+structure urban airspace so that delivery drones can operate safely without a
 centralized air traffic control tower. Each drone follows simple, local rules:
 
 1. **Corridor routing**: Fly along street-grid corridors only
@@ -16,8 +16,8 @@ centralized air traffic control tower. Each drone follows simple, local rules:
 3. **Intersection protocols**: Use geometric turning procedures at intersections
 4. **No communication**: Drones don't talk to each other
 
-We answer the question: **At what drone density does each airspace topology break
-down, and how do different intersection designs affect capacity?**
+We answer the question: **At what drone density does each airspace topology break down,
+and how do different intersection designs affect capacity?**
 
 ## Architecture
 
@@ -53,7 +53,8 @@ python run_experiments.py --phase all
 
 ### Phase 1: Abstract Grid (no external data required)
 - **Topology comparison**: Manhattan grid vs. grid + diagonal overlay
-- **Turning protocol comparison**: TU Delft turn-layer vs. 3D intersection cube vs. sphereabout
+- **Turning protocol comparison**: TU Delft turn-layer vs. 3D intersection cube vs.
+  sphereabout
 - **Capacity sweep**: 10 → 1000 drones, measuring conflicts, flight time, detour ratio
 - Outputs: capacity curves, 3D trajectory plots, heatmaps, BlueSky scenarios
 
@@ -67,16 +68,15 @@ python run_experiments.py --phase all
 ## Topologies
 
 | Feature | Manhattan Grid | Grid + Diagonals |
-|---------|---------------|-----------------|
-| Altitude bands | 4 (N/S/E/W) | 8 (+ NE/NW/SE/SW) |
-| Worst-case detour | √2 ≈ 1.41x | ~1.10x |
-| Rule complexity | Low | Moderate |
-| Intersection conflicts | Low | Higher (more crossing) |
+|---------|---------------|-----------------| | Altitude bands | 4 (N/S/E/W) | 8 (+
+NE/NW/SE/SW) | | Worst-case detour | √2 ≈ 1.41x | ~1.10x | | Rule complexity | Low |
+Moderate | | Intersection conflicts | Low | Higher (more crossing) |
 
 ## Turning Protocols
 
 1. **Turn Layer** (TU Delft): Climb to transition altitude → turn → descend to new band
-2. **Intersection Cube**: Follow diagonal paths through a 3D cube volume at intersections
+2. **Intersection Cube**: Follow diagonal paths through a 3D cube volume at
+   intersections
 3. **Sphereabout**: Follow great-circle arcs on a sphere (Moosavi & Farooq, 2025)
 
 ## BlueSky Integration
@@ -100,8 +100,12 @@ PCALL bluesky_scenarios/grid_20drones.scn
 
 ## Key References
 
-- Doole, Ellerbroek, Knoop & Hoekstra (2021). "Constrained Urban Airspace Design for Large-Scale Drone-Based Delivery Traffic." *Aerospace*.
-- Moosavi & Farooq (2025). "Sphereabout" — spherical roundabout intersections. *IEEE ITSC*.
-- Bauranov & Rakas (2021). "Designing Airspace for Urban Air Mobility." *Progress in Aerospace Sciences*.
+- Doole, Ellerbroek, Knoop & Hoekstra (2021). "Constrained Urban Airspace Design for
+  Large-Scale Drone-Based Delivery Traffic." *Aerospace*.
+- Moosavi & Farooq (2025). "Sphereabout" — spherical roundabout intersections. *IEEE
+  ITSC*.
+- Bauranov & Rakas (2021). "Designing Airspace for Urban Air Mobility." *Progress in
+  Aerospace Sciences*.
 - Sunil et al. (2015). "Metropolis: Relating Airspace Structure and Capacity." *ICRAT*.
-- Cummings & Mahmassani (2021). "Emergence of 4-D System Fundamental Diagram in UAM Traffic." *TRR*.
+- Cummings & Mahmassani (2021). "Emergence of 4-D System Fundamental Diagram in UAM
+  Traffic." *TRR*.

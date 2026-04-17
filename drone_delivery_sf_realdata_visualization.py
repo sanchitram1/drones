@@ -1,5 +1,6 @@
+import json
 import math
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -25,6 +26,8 @@ from pyproj import Transformer
 class SimConfig:
     data_dir: str = "data"
     random_seed: int = 42
+    turn_protocol: str = "simple"
+    demand_model: str = "time-series"
 
     # Demand / simulation horizon
     sim_duration_s: int = 2 * 3600  # 2 hours
@@ -33,6 +36,9 @@ class SimConfig:
     peak_multiplier: float = 1.8
     peak_window_s: Tuple[int, int] = (45 * 60, 95 * 60)
     n_orders_override: Optional[int] = None  # if set, ignore poisson time series
+    origin_weight_col: Optional[str] = None
+    dest_weight_col: Optional[str] = "pop_density"
+    dest_jitter_m: float = 100.0
 
     # Drone / routing parameters
     cruise_speed_ft_s: float = 35.0
@@ -59,6 +65,15 @@ class SimConfig:
     # Projection assumptions from your loader pipeline
     restaurants_census_crs: str = "EPSG:4326"
     graph_crs: str = "EPSG:32610"  # UTM Zone 10N, meters
+
+
+SUPPORTED_TURN_PROTOCOLS = {
+    "simple",
+    "turn_layer",
+    "intersection_cube",
+    "sphereabout",
+}
+SUPPORTED_DEMAND_MODELS = {"time-series", "fixed-count", "csv"}
 
 
 def ft_to_m(x: np.ndarray | float) -> np.ndarray | float:
@@ -193,14 +208,72 @@ def nearest_node_ids(
     return np.asarray(out)
 
 
-def generate_time_series_orders(
+def normalize_choice(value: str) -> str:
+    return value.strip().lower().replace("-", "_")
+
+
+def resolve_turn_protocol(turn_protocol: str) -> str:
+    normalized = normalize_choice(turn_protocol)
+    if normalized not in SUPPORTED_TURN_PROTOCOLS:
+        choices = ", ".join(sorted(SUPPORTED_TURN_PROTOCOLS))
+        raise ValueError(
+            f"Unsupported turn protocol '{turn_protocol}'. Expected one of: {choices}."
+        )
+    if normalized in {"intersection_cube", "sphereabout"}:
+        raise NotImplementedError(
+            f"Turn protocol '{normalized}' is not wired into "
+            "drone_delivery_sf_realdata_visualization.py yet. "
+            "Use 'simple' or 'turn_layer' for now."
+        )
+    return normalized
+
+
+def resolve_demand_model(demand_model: str) -> str:
+    normalized = normalize_choice(demand_model).replace("_", "-")
+    if normalized not in SUPPORTED_DEMAND_MODELS:
+        choices = ", ".join(sorted(SUPPORTED_DEMAND_MODELS))
+        raise ValueError(
+            f"Unsupported demand model '{demand_model}'. Expected one of: {choices}."
+        )
+    return normalized
+
+
+def compute_sampling_weights(
+    df: pd.DataFrame, column: Optional[str], label: str
+) -> np.ndarray:
+    if column is None:
+        return np.full(len(df), 1.0 / max(len(df), 1))
+    if column not in df.columns:
+        raise ValueError(
+            f"{label} weight column '{column}' was not found in the input data."
+        )
+
+    weights = pd.to_numeric(df[column], errors="coerce").fillna(0.0).to_numpy()
+    weights = np.maximum(weights, 0.0)
+    total = weights.sum()
+    if total <= 0:
+        raise ValueError(
+            f"{label} weight column '{column}' has no positive numeric values."
+        )
+    return weights / total
+
+
+def generate_orders(
     census: pd.DataFrame, restaurants: pd.DataFrame, G: nx.Graph, cfg: SimConfig
 ) -> pd.DataFrame:
     rng = np.random.default_rng(cfg.random_seed)
     node_ids = np.array(list(G.nodes()))
     nodes_xy = np.array([[G.nodes[n]["x"], G.nodes[n]["y"]] for n in node_ids])
+    demand_model = resolve_demand_model(cfg.demand_model)
 
-    if cfg.n_orders_override is not None:
+    if demand_model == "csv":
+        raise ValueError("CSV-driven demand must be loaded via load_orders_csv().")
+
+    if demand_model == "fixed-count":
+        if cfg.n_orders_override is None or cfg.n_orders_override <= 0:
+            raise ValueError(
+                "Fixed-count demand requires --n-orders / n_orders_override > 0."
+            )
         req_times = np.sort(rng.uniform(0, cfg.sim_duration_s, cfg.n_orders_override))
         n_orders = cfg.n_orders_override
     else:
@@ -219,22 +292,31 @@ def generate_time_series_orders(
         req_times = np.sort(np.asarray(req_times))
         n_orders = len(req_times)
 
-    rest_idx = rng.integers(0, len(restaurants), size=n_orders)
+    if n_orders == 0:
+        return pd.DataFrame(
+            columns=[
+                "order_id",
+                "request_time_s",
+                "origin_node",
+                "dest_node",
+                "orig_x",
+                "orig_y",
+                "dest_x",
+                "dest_y",
+            ]
+        )
+
+    origin_weights = compute_sampling_weights(
+        restaurants, cfg.origin_weight_col, "Origin"
+    )
+    rest_idx = rng.choice(len(restaurants), size=n_orders, p=origin_weights)
     origin_xy = restaurants[["x", "y"]].to_numpy()[rest_idx]
 
-    weights = (
-        pd.to_numeric(
-            census.get("pop_density", pd.Series(np.ones(len(census)))), errors="coerce"
-        )
-        .fillna(1.0)
-        .to_numpy()
-    )
-    weights = np.maximum(weights, 1e-6)
-    weights = weights / weights.sum()
-    dest_idx = rng.choice(len(census), size=n_orders, p=weights)
+    dest_weights = compute_sampling_weights(census, cfg.dest_weight_col, "Destination")
+    dest_idx = rng.choice(len(census), size=n_orders, p=dest_weights)
     dest_xy = census[["x", "y"]].to_numpy()[dest_idx].copy()
-    # add spatial jitter (~100m) so deliveries are not all at tract centroids
-    dest_xy += rng.normal(0.0, 100.0, size=dest_xy.shape)
+    # Add spatial jitter so deliveries are not all at tract centroids.
+    dest_xy += rng.normal(0.0, cfg.dest_jitter_m, size=dest_xy.shape)
 
     origin_nodes = nearest_node_ids(origin_xy, nodes_xy, node_ids)
     dest_nodes = nearest_node_ids(dest_xy, nodes_xy, node_ids)
@@ -242,9 +324,9 @@ def generate_time_series_orders(
     # avoid same-node trips
     same = origin_nodes == dest_nodes
     while np.any(same):
-        resample = rng.choice(len(census), size=same.sum(), p=weights)
+        resample = rng.choice(len(census), size=same.sum(), p=dest_weights)
         dest_xy[same] = census[["x", "y"]].to_numpy()[resample] + rng.normal(
-            0.0, 100.0, size=(same.sum(), 2)
+            0.0, cfg.dest_jitter_m, size=(same.sum(), 2)
         )
         dest_nodes[same] = nearest_node_ids(dest_xy[same], nodes_xy, node_ids)
         same = origin_nodes == dest_nodes
@@ -261,6 +343,60 @@ def generate_time_series_orders(
             "dest_y": dest_xy[:, 1],
         }
     )
+    return orders
+
+
+def generate_time_series_orders(
+    census: pd.DataFrame, restaurants: pd.DataFrame, G: nx.Graph, cfg: SimConfig
+) -> pd.DataFrame:
+    return generate_orders(census, restaurants, G, cfg)
+
+
+def load_orders_csv(orders_path: str | Path, G: nx.Graph) -> pd.DataFrame:
+    orders = pd.read_csv(orders_path).copy()
+
+    if "request_time_s" not in orders.columns and "request_time" in orders.columns:
+        orders = orders.rename(columns={"request_time": "request_time_s"})
+
+    required = {"origin_node", "dest_node", "request_time_s"}
+    missing = sorted(required - set(orders.columns))
+    if missing:
+        raise ValueError(
+            f"Orders CSV is missing required columns: {', '.join(missing)}."
+        )
+
+    if "order_id" not in orders.columns:
+        orders["order_id"] = np.arange(len(orders))
+
+    orders["origin_node"] = normalize_id_series(orders["origin_node"])
+    orders["dest_node"] = normalize_id_series(orders["dest_node"])
+    orders["request_time_s"] = pd.to_numeric(orders["request_time_s"], errors="coerce")
+
+    if orders["request_time_s"].isna().any():
+        raise ValueError("Orders CSV contains non-numeric request_time_s values.")
+
+    graph_nodes = set(G.nodes())
+    unknown_origins = sorted(set(orders["origin_node"]) - graph_nodes)
+    unknown_destinations = sorted(set(orders["dest_node"]) - graph_nodes)
+    if unknown_origins or unknown_destinations:
+        problems = []
+        if unknown_origins:
+            problems.append(
+                f"unknown origin nodes: {', '.join(unknown_origins[:5])}"
+            )
+        if unknown_destinations:
+            problems.append(
+                f"unknown destination nodes: {', '.join(unknown_destinations[:5])}"
+            )
+        raise ValueError("Orders CSV references nodes not present in the graph: " + "; ".join(problems))
+
+    if not {"orig_x", "orig_y"}.issubset(orders.columns):
+        orders["orig_x"] = orders["origin_node"].map(lambda n: G.nodes[n]["x"])
+        orders["orig_y"] = orders["origin_node"].map(lambda n: G.nodes[n]["y"])
+    if not {"dest_x", "dest_y"}.issubset(orders.columns):
+        orders["dest_x"] = orders["dest_node"].map(lambda n: G.nodes[n]["x"])
+        orders["dest_y"] = orders["dest_node"].map(lambda n: G.nodes[n]["y"])
+
     return orders
 
 
@@ -478,6 +614,8 @@ def visualize_all(
     results_df: pd.DataFrame,
     used_edge_counts: Dict[Tuple[str, str], int],
     cfg: SimConfig,
+    show: bool = True,
+    save_prefix: Optional[str | Path] = None,
 ):
     if results_df.empty:
         raise RuntimeError(
@@ -657,47 +795,230 @@ def visualize_all(
     axs[2].set_ylabel("Completed orders")
 
     plt.tight_layout()
-    plt.show()
+    saved_paths = {}
+    if save_prefix is not None:
+        prefix = resolve_output_prefix(save_prefix)
+        overview_path = prefix.parent / f"{prefix.name}_overview.png"
+        summary_path = prefix.parent / f"{prefix.name}_summary.png"
+        fig.savefig(overview_path, dpi=150, bbox_inches="tight")
+        fig2.savefig(summary_path, dpi=150, bbox_inches="tight")
+        saved_paths = {
+            "overview_figure": str(overview_path),
+            "summary_figure": str(summary_path),
+        }
+
+    if show:
+        plt.show()
+
+    plt.close(fig)
+    plt.close(fig2)
+    return saved_paths
 
 
-def print_summary(
-    results_df: pd.DataFrame, conflict_count: int, orders: pd.DataFrame, G: nx.Graph
-):
+def build_summary(
+    results_df: pd.DataFrame,
+    conflict_count: int,
+    orders: pd.DataFrame,
+    G: nx.Graph,
+    cfg: SimConfig,
+    demand_source: str,
+) -> Dict[str, float | int | str]:
     served = len(results_df)
     total = len(orders)
-    print(f"Loaded graph: {G.number_of_nodes()} nodes, {G.number_of_edges()} edges")
-    print(f"Orders generated: {total}")
-    print(f"Feasible / served: {served} ({100 * served / max(total, 1):.1f}%)")
+    if served == 0:
+        avg_total_time_s = 0.0
+        avg_launch_delay_s = 0.0
+        avg_detour_ratio = 0.0
+        avg_turns = 0.0
+        max_total_time_s = 0.0
+    else:
+        avg_total_time_s = float(results_df["total_time_s"].mean())
+        avg_launch_delay_s = float(results_df["launch_delay_s"].mean())
+        avg_detour_ratio = float(results_df["detour_ratio"].mean())
+        avg_turns = float(results_df["n_turns"].mean())
+        max_total_time_s = float(results_df["total_time_s"].max())
+
+    return {
+        "graph_nodes": int(G.number_of_nodes()),
+        "graph_edges": int(G.number_of_edges()),
+        "orders_generated": int(total),
+        "orders_served": int(served),
+        "orders_served_pct": float(100 * served / max(total, 1)),
+        "avg_total_time_s": avg_total_time_s,
+        "avg_total_time_min": avg_total_time_s / 60.0,
+        "avg_launch_delay_s": avg_launch_delay_s,
+        "avg_detour_ratio": avg_detour_ratio,
+        "avg_turns": avg_turns,
+        "conflict_risk_count": int(conflict_count),
+        "max_total_time_s": max_total_time_s,
+        "turn_protocol": cfg.turn_protocol,
+        "demand_source": demand_source,
+        "data_dir": cfg.data_dir,
+        "random_seed": int(cfg.random_seed),
+    }
+
+
+def print_summary(summary: Dict[str, float | int | str]):
     print(
-        f"Average total time: {results_df['total_time_s'].mean():.1f} s ({results_df['total_time_s'].mean() / 60:.2f} min)"
+        f"Loaded graph: {summary['graph_nodes']} nodes, "
+        f"{summary['graph_edges']} edges"
     )
-    print(f"Average launch delay: {results_df['launch_delay_s'].mean():.1f} s")
-    print(f"Average detour ratio: {results_df['detour_ratio'].mean():.3f}")
-    print(f"Average turns: {results_df['n_turns'].mean():.2f}")
-    print(f"Conflict-risk count: {conflict_count}")
-    print(f"Max total time: {results_df['total_time_s'].max():.1f} s")
+    print(f"Orders generated: {summary['orders_generated']}")
+    print(
+        f"Feasible / served: {summary['orders_served']} "
+        f"({summary['orders_served_pct']:.1f}%)"
+    )
+    print(
+        f"Average total time: {summary['avg_total_time_s']:.1f} s "
+        f"({summary['avg_total_time_min']:.2f} min)"
+    )
+    print(f"Average launch delay: {summary['avg_launch_delay_s']:.1f} s")
+    print(f"Average detour ratio: {summary['avg_detour_ratio']:.3f}")
+    print(f"Average turns: {summary['avg_turns']:.2f}")
+    print(f"Conflict-risk count: {summary['conflict_risk_count']}")
+    print(f"Max total time: {summary['max_total_time_s']:.1f} s")
 
 
-def main():
-    cfg = SimConfig()
+def resolve_output_prefix(output_path: str | Path) -> Path:
+    path = Path(output_path)
+    if path.suffix:
+        path = path.with_suffix("")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def save_orders_csv(orders: pd.DataFrame, output_path: str | Path) -> str:
+    output = Path(output_path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    orders.to_csv(output, index=False)
+    return str(output)
+
+
+def save_run_outputs(
+    results_df: pd.DataFrame,
+    used_edge_counts: Dict[Tuple[str, str], int],
+    cfg: SimConfig,
+    summary: Dict[str, float | int | str],
+    output_prefix: str | Path,
+) -> Dict[str, str]:
+    prefix = resolve_output_prefix(output_prefix)
+
+    results_path = prefix.parent / f"{prefix.name}_results.csv"
+    edge_usage_path = prefix.parent / f"{prefix.name}_edge_usage.csv"
+    summary_path = prefix.parent / f"{prefix.name}_summary.json"
+    config_path = prefix.parent / f"{prefix.name}_config.json"
+
+    results_df.to_csv(results_path, index=False)
+
+    edge_usage_df = pd.DataFrame(
+        [
+            {"u": u, "v": v, "count": count}
+            for (u, v), count in sorted(used_edge_counts.items())
+        ]
+    )
+    edge_usage_df.to_csv(edge_usage_path, index=False)
+
+    with open(summary_path, "w") as f:
+        json.dump(summary, f, indent=2, sort_keys=True)
+    with open(config_path, "w") as f:
+        json.dump(asdict(cfg), f, indent=2, sort_keys=True)
+
+    return {
+        "results_csv": str(results_path),
+        "edge_usage_csv": str(edge_usage_path),
+        "summary_json": str(summary_path),
+        "config_json": str(config_path),
+    }
+
+
+def run_simulation(
+    cfg: Optional[SimConfig] = None,
+    orders: Optional[pd.DataFrame] = None,
+    orders_csv: Optional[str | Path] = None,
+    show: bool = True,
+    save_figure: Optional[str | Path] = None,
+    save_results: Optional[str | Path] = None,
+    save_orders: Optional[str | Path] = None,
+):
+    cfg = cfg or SimConfig()
+    cfg.turn_protocol = resolve_turn_protocol(cfg.turn_protocol)
+    cfg.demand_model = resolve_demand_model(cfg.demand_model)
     np.random.seed(cfg.random_seed)
+
+    if orders is not None and orders_csv is not None:
+        raise ValueError("Pass either orders or orders_csv, not both.")
+    if cfg.demand_model == "csv" and orders_csv is None and orders is None:
+        raise ValueError("Demand model 'csv' requires --orders-csv.")
 
     nodes, edges, census, restaurants = load_real_data(cfg)
     print(
-        f"Loaded {len(nodes)} nodes, {len(edges)} edges, {len(census)} census zones, {len(restaurants)} restaurants"
+        f"Loaded {len(nodes)} nodes, {len(edges)} edges, "
+        f"{len(census)} census zones, {len(restaurants)} restaurants"
     )
 
     G = build_graph(nodes, edges)
-    orders = generate_time_series_orders(census, restaurants, G, cfg)
+
+    if orders_csv is not None:
+        orders = load_orders_csv(orders_csv, G)
+        demand_source = "csv"
+    elif orders is None:
+        orders = generate_orders(census, restaurants, G, cfg)
+        demand_source = cfg.demand_model
+    else:
+        demand_source = "dataframe"
+
+    saved_paths: Dict[str, str] = {}
+    if save_orders is not None:
+        saved_paths["orders_csv"] = save_orders_csv(orders, save_orders)
+
     results, results_df, used_edge_counts, conflict_count = simulate_orders(
         G, orders, cfg
     )
     if results_df.empty:
         raise RuntimeError(
-            "Simulation produced no feasible routes. Reduce altitude constraints or inspect edge corridor heights."
+            "Simulation produced no feasible routes. Reduce altitude constraints "
+            "or inspect edge corridor heights."
         )
-    print_summary(results_df, conflict_count, orders, G)
-    visualize_all(G, orders, results, results_df, used_edge_counts, cfg)
+
+    summary = build_summary(results_df, conflict_count, orders, G, cfg, demand_source)
+    print_summary(summary)
+
+    if save_results is not None:
+        saved_paths.update(
+            save_run_outputs(results_df, used_edge_counts, cfg, summary, save_results)
+        )
+    if show or save_figure is not None:
+        saved_paths.update(
+            visualize_all(
+                G,
+                orders,
+                results,
+                results_df,
+                used_edge_counts,
+                cfg,
+                show=show,
+                save_prefix=save_figure,
+            )
+        )
+
+    for label, path in saved_paths.items():
+        print(f"Saved {label}: {path}")
+
+    return {
+        "config": cfg,
+        "graph": G,
+        "orders": orders,
+        "results": results,
+        "results_df": results_df,
+        "used_edge_counts": used_edge_counts,
+        "conflict_count": conflict_count,
+        "summary": summary,
+        "saved_paths": saved_paths,
+    }
+
+
+def main():
+    run_simulation(SimConfig(), show=True)
 
 
 if __name__ == "__main__":
