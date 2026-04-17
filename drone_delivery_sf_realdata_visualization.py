@@ -1,17 +1,15 @@
 import math
-import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Optional, Tuple
 
 import matplotlib.pyplot as plt
-from matplotlib import cm
-from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
 import networkx as nx
 import numpy as np
 import pandas as pd
+from matplotlib import cm
+from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
 from pyproj import Transformer
-
 
 # ================================================================
 # San Francisco Drone Delivery Simulation (Python version)
@@ -29,12 +27,12 @@ class SimConfig:
     random_seed: int = 42
 
     # Demand / simulation horizon
-    sim_duration_s: int = 2 * 3600          # 2 hours
-    dt_s: int = 30                          # demand discretization step
-    base_lambda_per_min: float = 6.0        # average orders/min systemwide
+    sim_duration_s: int = 2 * 3600  # 2 hours
+    dt_s: int = 30  # demand discretization step
+    base_lambda_per_min: float = 6.0  # average orders/min systemwide
     peak_multiplier: float = 1.8
     peak_window_s: Tuple[int, int] = (45 * 60, 95 * 60)
-    n_orders_override: Optional[int] = None # if set, ignore poisson time series
+    n_orders_override: Optional[int] = None  # if set, ignore poisson time series
 
     # Drone / routing parameters
     cruise_speed_ft_s: float = 35.0
@@ -53,22 +51,30 @@ class SimConfig:
     alt_turn_ft: float = 370.0
 
     # Capacity model
-    edge_time_headway_s: float = 3.0        # min time gap on same directional corridor
-    intersection_headway_s: float = 4.0     # min time gap for turn/intersection use
+    edge_time_headway_s: float = 3.0  # min time gap on same directional corridor
+    intersection_headway_s: float = 4.0  # min time gap for turn/intersection use
     max_demo_routes_3d: int = 8
     max_demo_routes_map: int = 120
 
     # Projection assumptions from your loader pipeline
     restaurants_census_crs: str = "EPSG:4326"
-    graph_crs: str = "EPSG:32610"          # UTM Zone 10N, meters
+    graph_crs: str = "EPSG:32610"  # UTM Zone 10N, meters
 
 
 def ft_to_m(x: np.ndarray | float) -> np.ndarray | float:
-    return np.asarray(x) * 0.3048 if isinstance(x, (list, tuple, np.ndarray)) else x * 0.3048
+    return (
+        np.asarray(x) * 0.3048
+        if isinstance(x, (list, tuple, np.ndarray))
+        else x * 0.3048
+    )
 
 
 def m_to_ft(x: np.ndarray | float) -> np.ndarray | float:
-    return np.asarray(x) / 0.3048 if isinstance(x, (list, tuple, np.ndarray)) else x / 0.3048
+    return (
+        np.asarray(x) / 0.3048
+        if isinstance(x, (list, tuple, np.ndarray))
+        else x / 0.3048
+    )
 
 
 def normalize_id_series(s: pd.Series) -> pd.Series:
@@ -77,14 +83,26 @@ def normalize_id_series(s: pd.Series) -> pd.Series:
 
 def safe_corridor_height_ft(edges: pd.DataFrame) -> np.ndarray:
     if "corridor_height_ft" in edges.columns:
-        return pd.to_numeric(edges["corridor_height_ft"], errors="coerce").fillna(40.0).to_numpy()
+        return (
+            pd.to_numeric(edges["corridor_height_ft"], errors="coerce")
+            .fillna(40.0)
+            .to_numpy()
+        )
     if "corridor_height_m" in edges.columns:
-        return m_to_ft(pd.to_numeric(edges["corridor_height_m"], errors="coerce").fillna(12.0).to_numpy())
+        return m_to_ft(
+            pd.to_numeric(edges["corridor_height_m"], errors="coerce")
+            .fillna(12.0)
+            .to_numpy()
+        )
     return np.full(len(edges), 40.0)
 
 
-def project_latlon_to_graph_xy(lat: np.ndarray, lon: np.ndarray, cfg: SimConfig) -> Tuple[np.ndarray, np.ndarray]:
-    transformer = Transformer.from_crs(cfg.restaurants_census_crs, cfg.graph_crs, always_xy=True)
+def project_latlon_to_graph_xy(
+    lat: np.ndarray, lon: np.ndarray, cfg: SimConfig
+) -> Tuple[np.ndarray, np.ndarray]:
+    transformer = Transformer.from_crs(
+        cfg.restaurants_census_crs, cfg.graph_crs, always_xy=True
+    )
     x, y = transformer.transform(lon, lat)
     return np.asarray(x), np.asarray(y)
 
@@ -96,7 +114,11 @@ def load_real_data(cfg: SimConfig):
     census_path = data_dir / "sf_census.csv"
     restaurants_path = data_dir / "sf_restaurants.csv"
 
-    missing = [str(p) for p in [nodes_path, edges_path, census_path, restaurants_path] if not p.exists()]
+    missing = [
+        str(p)
+        for p in [nodes_path, edges_path, census_path, restaurants_path]
+        if not p.exists()
+    ]
     if missing:
         raise FileNotFoundError(
             "Missing required exported files:\n  - " + "\n  - ".join(missing)
@@ -144,25 +166,36 @@ def build_graph(nodes: pd.DataFrame, edges: pd.DataFrame) -> nx.Graph:
         if G.has_edge(row.u, row.v):
             # keep the shortest parallel edge
             if float(row.length_m) < G[row.u][row.v]["length_m"]:
-                G[row.u][row.v].update(length_m=float(row.length_m), corridor_height_ft=float(height_ft))
+                G[row.u][row.v].update(
+                    length_m=float(row.length_m), corridor_height_ft=float(height_ft)
+                )
         else:
-            G.add_edge(row.u, row.v, length_m=float(row.length_m), corridor_height_ft=float(height_ft))
+            G.add_edge(
+                row.u,
+                row.v,
+                length_m=float(row.length_m),
+                corridor_height_ft=float(height_ft),
+            )
     return G
 
 
-def nearest_node_ids(points_xy: np.ndarray, nodes_xy: np.ndarray, node_ids: np.ndarray) -> np.ndarray:
+def nearest_node_ids(
+    points_xy: np.ndarray, nodes_xy: np.ndarray, node_ids: np.ndarray
+) -> np.ndarray:
     # Chunked nearest-neighbor using vectorized distance; good enough for a few thousand points.
     out = []
     batch = 128
     for i in range(0, len(points_xy), batch):
-        P = points_xy[i:i+batch]
+        P = points_xy[i : i + batch]
         d2 = ((P[:, None, :] - nodes_xy[None, :, :]) ** 2).sum(axis=2)
         idx = np.argmin(d2, axis=1)
         out.extend(node_ids[idx])
     return np.asarray(out)
 
 
-def generate_time_series_orders(census: pd.DataFrame, restaurants: pd.DataFrame, G: nx.Graph, cfg: SimConfig) -> pd.DataFrame:
+def generate_time_series_orders(
+    census: pd.DataFrame, restaurants: pd.DataFrame, G: nx.Graph, cfg: SimConfig
+) -> pd.DataFrame:
     rng = np.random.default_rng(cfg.random_seed)
     node_ids = np.array(list(G.nodes()))
     nodes_xy = np.array([[G.nodes[n]["x"], G.nodes[n]["y"]] for n in node_ids])
@@ -189,7 +222,13 @@ def generate_time_series_orders(census: pd.DataFrame, restaurants: pd.DataFrame,
     rest_idx = rng.integers(0, len(restaurants), size=n_orders)
     origin_xy = restaurants[["x", "y"]].to_numpy()[rest_idx]
 
-    weights = pd.to_numeric(census.get("pop_density", pd.Series(np.ones(len(census)))), errors="coerce").fillna(1.0).to_numpy()
+    weights = (
+        pd.to_numeric(
+            census.get("pop_density", pd.Series(np.ones(len(census)))), errors="coerce"
+        )
+        .fillna(1.0)
+        .to_numpy()
+    )
     weights = np.maximum(weights, 1e-6)
     weights = weights / weights.sum()
     dest_idx = rng.choice(len(census), size=n_orders, p=weights)
@@ -204,20 +243,24 @@ def generate_time_series_orders(census: pd.DataFrame, restaurants: pd.DataFrame,
     same = origin_nodes == dest_nodes
     while np.any(same):
         resample = rng.choice(len(census), size=same.sum(), p=weights)
-        dest_xy[same] = census[["x", "y"]].to_numpy()[resample] + rng.normal(0.0, 100.0, size=(same.sum(), 2))
+        dest_xy[same] = census[["x", "y"]].to_numpy()[resample] + rng.normal(
+            0.0, 100.0, size=(same.sum(), 2)
+        )
         dest_nodes[same] = nearest_node_ids(dest_xy[same], nodes_xy, node_ids)
         same = origin_nodes == dest_nodes
 
-    orders = pd.DataFrame({
-        "order_id": np.arange(n_orders),
-        "request_time_s": req_times,
-        "origin_node": origin_nodes,
-        "dest_node": dest_nodes,
-        "orig_x": origin_xy[:, 0],
-        "orig_y": origin_xy[:, 1],
-        "dest_x": dest_xy[:, 0],
-        "dest_y": dest_xy[:, 1],
-    })
+    orders = pd.DataFrame(
+        {
+            "order_id": np.arange(n_orders),
+            "request_time_s": req_times,
+            "origin_node": origin_nodes,
+            "dest_node": dest_nodes,
+            "orig_x": origin_xy[:, 0],
+            "orig_y": origin_xy[:, 1],
+            "dest_x": dest_xy[:, 0],
+            "dest_y": dest_xy[:, 1],
+        }
+    )
     return orders
 
 
@@ -242,7 +285,9 @@ def heading_altitude_ft(direction: str, cfg: SimConfig) -> float:
     }[direction]
 
 
-def reserve_time_window(resource_map: Dict, key, start: float, duration: float, headway: float) -> float:
+def reserve_time_window(
+    resource_map: Dict, key, start: float, duration: float, headway: float
+) -> float:
     bookings = resource_map.setdefault(key, [])
     proposed = start
     while True:
@@ -271,13 +316,19 @@ def simulate_orders(G: nx.Graph, orders: pd.DataFrame, cfg: SimConfig):
     for order in orders_sorted.itertuples(index=False):
         demand_trace.append((order.request_time_s, 1))
         try:
-            path = nx.shortest_path(G, source=order.origin_node, target=order.dest_node, weight="length_m")
+            path = nx.shortest_path(
+                G, source=order.origin_node, target=order.dest_node, weight="length_m"
+            )
         except nx.NetworkXNoPath:
             continue
 
         # Precompute path geometry / routing stats
-        path_xy = np.array([[G.nodes[n]["x"], G.nodes[n]["y"]] for n in path], dtype=float)
-        euclid_m = float(np.hypot(path_xy[-1, 0] - path_xy[0, 0], path_xy[-1, 1] - path_xy[0, 1]))
+        path_xy = np.array(
+            [[G.nodes[n]["x"], G.nodes[n]["y"]] for n in path], dtype=float
+        )
+        euclid_m = float(
+            np.hypot(path_xy[-1, 0] - path_xy[0, 0], path_xy[-1, 1] - path_xy[0, 1])
+        )
         manhattan_like_m = 0.0
         directions = []
         seg_lengths_m = []
@@ -289,7 +340,9 @@ def simulate_orders(G: nx.Graph, orders: pd.DataFrame, cfg: SimConfig):
             seg_lengths_m.append(float(G[a][b]["length_m"]))
             manhattan_like_m += abs(xb - xa) + abs(yb - ya)
             seg_edge_heights_ft.append(float(G[a][b].get("corridor_height_ft", 40.0)))
-        n_turns = sum(directions[i] != directions[i - 1] for i in range(1, len(directions)))
+        n_turns = sum(
+            directions[i] != directions[i - 1] for i in range(1, len(directions))
+        )
 
         # Check altitude feasibility from building clearances
         feasible = True
@@ -315,12 +368,20 @@ def simulate_orders(G: nx.Graph, orders: pd.DataFrame, cfg: SimConfig):
 
         seg_records = []
         prev_dir = None
-        for idx, (a, b, d, seg_len_m) in enumerate(zip(path[:-1], path[1:], directions, seg_lengths_m)):
+        for idx, (a, b, d, seg_len_m) in enumerate(
+            zip(path[:-1], path[1:], directions, seg_lengths_m)
+        ):
             if prev_dir is not None and d != prev_dir:
-                turn_dur = ((cfg.alt_turn_ft - heading_altitude_ft(prev_dir, cfg)) / cfg.climb_rate_ft_s +
-                            cfg.turn_time_s +
-                            (cfg.alt_turn_ft - heading_altitude_ft(d, cfg)) / cfg.descend_rate_ft_s)
-                key_inter = b if False else a  # turn occurs at current intersection (start node of new segment)
+                turn_dur = (
+                    (cfg.alt_turn_ft - heading_altitude_ft(prev_dir, cfg))
+                    / cfg.climb_rate_ft_s
+                    + cfg.turn_time_s
+                    + (cfg.alt_turn_ft - heading_altitude_ft(d, cfg))
+                    / cfg.descend_rate_ft_s
+                )
+                key_inter = (
+                    b if False else a
+                )  # turn occurs at current intersection (start node of new segment)
                 reserved_turn_start = reserve_time_window(
                     intersection_bookings,
                     key_inter,
@@ -347,37 +408,41 @@ def simulate_orders(G: nx.Graph, orders: pd.DataFrame, cfg: SimConfig):
             current_time = seg_end
             prev_dir = d
             used_edge_counts[ekey] = used_edge_counts.get(ekey, 0) + 1
-            seg_records.append({
-                "u": a,
-                "v": b,
-                "direction": d,
-                "alt_ft": heading_altitude_ft(d, cfg),
-                "start_s": seg_start,
-                "end_s": seg_end,
-                "length_m": seg_len_m,
-            })
+            seg_records.append(
+                {
+                    "u": a,
+                    "v": b,
+                    "direction": d,
+                    "alt_ft": heading_altitude_ft(d, cfg),
+                    "start_s": seg_start,
+                    "end_s": seg_end,
+                    "length_m": seg_len_m,
+                }
+            )
 
         landing_time = heading_altitude_ft(directions[-1], cfg) / cfg.descend_rate_ft_s
         finish_time = current_time + landing_time
         total_time = finish_time - request_time
 
-        results.append({
-            "order_id": order.order_id,
-            "request_time_s": request_time,
-            "launch_time_s": launch_time,
-            "finish_time_s": finish_time,
-            "launch_delay_s": launch_delay,
-            "total_time_s": total_time,
-            "origin_node": order.origin_node,
-            "dest_node": order.dest_node,
-            "path": path,
-            "path_xy": path_xy,
-            "seg_records": seg_records,
-            "manhattan_like_m": manhattan_like_m,
-            "euclidean_m": euclid_m,
-            "detour_ratio": manhattan_like_m / max(euclid_m, 1e-9),
-            "n_turns": n_turns,
-        })
+        results.append(
+            {
+                "order_id": order.order_id,
+                "request_time_s": request_time,
+                "launch_time_s": launch_time,
+                "finish_time_s": finish_time,
+                "launch_delay_s": launch_delay,
+                "total_time_s": total_time,
+                "origin_node": order.origin_node,
+                "dest_node": order.dest_node,
+                "path": path,
+                "path_xy": path_xy,
+                "seg_records": seg_records,
+                "manhattan_like_m": manhattan_like_m,
+                "euclidean_m": euclid_m,
+                "detour_ratio": manhattan_like_m / max(euclid_m, 1e-9),
+                "n_turns": n_turns,
+            }
+        )
 
     # Pairwise near-conflict screening based on same edge/direction overlap and spatial threshold
     conflict_count = 0
@@ -396,21 +461,28 @@ def simulate_orders(G: nx.Graph, orders: pd.DataFrame, cfg: SimConfig):
                     if gap_ft < cfg.collision_radius_ft:
                         conflict_count += 1
 
-    results_df = pd.DataFrame([
-        {
-            k: v for k, v in r.items()
-            if k not in {"path", "path_xy", "seg_records"}
-        }
-        for r in results
-    ])
+    results_df = pd.DataFrame(
+        [
+            {k: v for k, v in r.items() if k not in {"path", "path_xy", "seg_records"}}
+            for r in results
+        ]
+    )
 
     return results, results_df, used_edge_counts, conflict_count
 
 
-def visualize_all(G: nx.Graph, orders: pd.DataFrame, results: List[dict], results_df: pd.DataFrame,
-                  used_edge_counts: Dict[Tuple[str, str], int], cfg: SimConfig):
+def visualize_all(
+    G: nx.Graph,
+    orders: pd.DataFrame,
+    results: List[dict],
+    results_df: pd.DataFrame,
+    used_edge_counts: Dict[Tuple[str, str], int],
+    cfg: SimConfig,
+):
     if results_df.empty:
-        raise RuntimeError("No feasible routes were simulated. Check altitude / clearance assumptions.")
+        raise RuntimeError(
+            "No feasible routes were simulated. Check altitude / clearance assumptions."
+        )
 
     fig = plt.figure(figsize=(18, 10))
 
@@ -427,12 +499,20 @@ def visualize_all(G: nx.Graph, orders: pd.DataFrame, results: List[dict], result
         ax1.plot([x1, x2], [y1, y2], color="0.88", lw=0.35, zorder=1)
 
     cmap = cm.get_cmap("viridis", min(len(results), cfg.max_demo_routes_map))
-    for i, r in enumerate(results[:cfg.max_demo_routes_map]):
+    for i, r in enumerate(results[: cfg.max_demo_routes_map]):
         xy = r["path_xy"]
         ax1.plot(xy[:, 0], xy[:, 1], color=cmap(i), lw=1.0, alpha=0.65, zorder=2)
     first = results[0]["path_xy"]
     ax1.scatter(first[0, 0], first[0, 1], c="g", s=30, label="Origin", zorder=3)
-    ax1.scatter(first[-1, 0], first[-1, 1], c="r", s=30, marker="s", label="Destination", zorder=3)
+    ax1.scatter(
+        first[-1, 0],
+        first[-1, 1],
+        c="r",
+        s=30,
+        marker="s",
+        label="Destination",
+        zorder=3,
+    )
     ax1.legend(loc="best")
     ax1.set_aspect("equal", adjustable="box")
 
@@ -443,7 +523,7 @@ def visualize_all(G: nx.Graph, orders: pd.DataFrame, results: List[dict], result
     ax2.set_ylabel("y (m)")
     ax2.set_zlabel("Altitude (ft)")
     c3 = cm.get_cmap("tab10", cfg.max_demo_routes_3d)
-    for i, r in enumerate(results[:cfg.max_demo_routes_3d]):
+    for i, r in enumerate(results[: cfg.max_demo_routes_3d]):
         xy = r["path_xy"]
         segs = r["seg_records"]
         wx = [xy[0, 0], xy[0, 0]]
@@ -458,17 +538,30 @@ def visualize_all(G: nx.Graph, orders: pd.DataFrame, results: List[dict], result
                 wx.extend([ax_u[0], ax_u[0]])
                 wy.extend([ax_u[1], ax_u[1]])
                 wz.extend([cfg.alt_turn_ft, cur_alt])
-            wx.append(ax_v[0]); wy.append(ax_v[1]); wz.append(cur_alt)
+            wx.append(ax_v[0])
+            wy.append(ax_v[1])
+            wz.append(cur_alt)
             prev_dir = seg["direction"]
-        wx.append(xy[-1, 0]); wy.append(xy[-1, 1]); wz.append(0.0)
+        wx.append(xy[-1, 0])
+        wy.append(xy[-1, 1])
+        wz.append(0.0)
         ax2.plot(wx, wy, wz, color=c3(i), lw=1.4)
     ax2.view_init(elev=24, azim=32)
 
     # 3. Manhattan-like vs Euclidean scatter
     ax3 = fig.add_subplot(2, 3, 3)
-    sc = ax3.scatter(results_df["euclidean_m"], results_df["manhattan_like_m"],
-                     c=results_df["n_turns"], s=28, cmap="hot", alpha=0.75)
-    md = max(results_df["manhattan_like_m"].max(), results_df["euclidean_m"].max()) * 1.05
+    sc = ax3.scatter(
+        results_df["euclidean_m"],
+        results_df["manhattan_like_m"],
+        c=results_df["n_turns"],
+        s=28,
+        cmap="hot",
+        alpha=0.75,
+    )
+    md = (
+        max(results_df["manhattan_like_m"].max(), results_df["euclidean_m"].max())
+        * 1.05
+    )
     ax3.plot([0, md], [0, md], "k--", lw=0.8)
     ax3.plot([0, md], [0, md * math.sqrt(2)], "r--", lw=0.8)
     ax3.set_title("Route Efficiency")
@@ -488,8 +581,18 @@ def visualize_all(G: nx.Graph, orders: pd.DataFrame, results: List[dict], result
 
     # 5. flight time + delay distributions
     ax5 = fig.add_subplot(2, 3, 5)
-    ax5.hist(results_df["total_time_s"] / 60.0, bins=20, alpha=0.7, label="Total flight time (min)")
-    ax5.hist(results_df["launch_delay_s"] / 60.0, bins=20, alpha=0.6, label="Launch delay (min)")
+    ax5.hist(
+        results_df["total_time_s"] / 60.0,
+        bins=20,
+        alpha=0.7,
+        label="Total flight time (min)",
+    )
+    ax5.hist(
+        results_df["launch_delay_s"] / 60.0,
+        bins=20,
+        alpha=0.6,
+        label="Launch delay (min)",
+    )
     ax5.set_title("Time Distributions")
     ax5.set_xlabel("Minutes")
     ax5.set_ylabel("Count")
@@ -507,10 +610,19 @@ def visualize_all(G: nx.Graph, orders: pd.DataFrame, results: List[dict], result
             x1, y1 = G.nodes[u]["x"], G.nodes[u]["y"]
             x2, y2 = G.nodes[v]["x"], G.nodes[v]["y"]
             color = cm.plasma((c - vmin) / (max(vmax - vmin, 1e-9)))
-            ax6.plot([x1, x2], [y1, y2], color=color, lw=1.4 + 2.5 * (c - vmin) / (max(vmax - vmin, 1e-9)))
+            ax6.plot(
+                [x1, x2],
+                [y1, y2],
+                color=color,
+                lw=1.4 + 2.5 * (c - vmin) / (max(vmax - vmin, 1e-9)),
+            )
     ax6.set_aspect("equal", adjustable="box")
 
-    plt.suptitle("San Francisco Drone Delivery Simulation — Python Visualization", fontsize=15, fontweight="bold")
+    plt.suptitle(
+        "San Francisco Drone Delivery Simulation — Python Visualization",
+        fontsize=15,
+        fontweight="bold",
+    )
     plt.tight_layout()
 
     # Extra figure: capacity-style summaries
@@ -521,20 +633,24 @@ def visualize_all(G: nx.Graph, orders: pd.DataFrame, results: List[dict], result
     axs[0].set_xlabel("Grid metric / Euclidean")
     axs[0].set_ylabel("Count")
 
-    dir_counts = {
-        "N": 0, "S": 0, "E": 0, "W": 0
-    }
+    dir_counts = {"N": 0, "S": 0, "E": 0, "W": 0}
     for r in results:
         for seg in r["seg_records"]:
             dir_counts[seg["direction"]] += 1
-    axs[1].bar([cfg.alt_north_ft, cfg.alt_south_ft, cfg.alt_east_ft, cfg.alt_west_ft],
-               [dir_counts["N"], dir_counts["S"], dir_counts["E"], dir_counts["W"]],
-               width=8)
+    axs[1].bar(
+        [cfg.alt_north_ft, cfg.alt_south_ft, cfg.alt_east_ft, cfg.alt_west_ft],
+        [dir_counts["N"], dir_counts["S"], dir_counts["E"], dir_counts["W"]],
+        width=8,
+    )
     axs[1].set_title("Altitude Band Utilization")
     axs[1].set_xlabel("Altitude (ft)")
     axs[1].set_ylabel("Segments used")
 
-    served_by_min = np.cumsum(np.histogram(results_df["finish_time_s"], bins=np.arange(0, cfg.sim_duration_s + 60, 60))[0])
+    served_by_min = np.cumsum(
+        np.histogram(
+            results_df["finish_time_s"], bins=np.arange(0, cfg.sim_duration_s + 60, 60)
+        )[0]
+    )
     axs[2].plot(np.arange(len(served_by_min)), served_by_min, lw=2)
     axs[2].set_title("Cumulative Deliveries Completed")
     axs[2].set_xlabel("Time (min)")
@@ -544,13 +660,17 @@ def visualize_all(G: nx.Graph, orders: pd.DataFrame, results: List[dict], result
     plt.show()
 
 
-def print_summary(results_df: pd.DataFrame, conflict_count: int, orders: pd.DataFrame, G: nx.Graph):
+def print_summary(
+    results_df: pd.DataFrame, conflict_count: int, orders: pd.DataFrame, G: nx.Graph
+):
     served = len(results_df)
     total = len(orders)
     print(f"Loaded graph: {G.number_of_nodes()} nodes, {G.number_of_edges()} edges")
     print(f"Orders generated: {total}")
-    print(f"Feasible / served: {served} ({100 * served / max(total,1):.1f}%)")
-    print(f"Average total time: {results_df['total_time_s'].mean():.1f} s ({results_df['total_time_s'].mean()/60:.2f} min)")
+    print(f"Feasible / served: {served} ({100 * served / max(total, 1):.1f}%)")
+    print(
+        f"Average total time: {results_df['total_time_s'].mean():.1f} s ({results_df['total_time_s'].mean() / 60:.2f} min)"
+    )
     print(f"Average launch delay: {results_df['launch_delay_s'].mean():.1f} s")
     print(f"Average detour ratio: {results_df['detour_ratio'].mean():.3f}")
     print(f"Average turns: {results_df['n_turns'].mean():.2f}")
@@ -563,13 +683,19 @@ def main():
     np.random.seed(cfg.random_seed)
 
     nodes, edges, census, restaurants = load_real_data(cfg)
-    print(f"Loaded {len(nodes)} nodes, {len(edges)} edges, {len(census)} census zones, {len(restaurants)} restaurants")
+    print(
+        f"Loaded {len(nodes)} nodes, {len(edges)} edges, {len(census)} census zones, {len(restaurants)} restaurants"
+    )
 
     G = build_graph(nodes, edges)
     orders = generate_time_series_orders(census, restaurants, G, cfg)
-    results, results_df, used_edge_counts, conflict_count = simulate_orders(G, orders, cfg)
+    results, results_df, used_edge_counts, conflict_count = simulate_orders(
+        G, orders, cfg
+    )
     if results_df.empty:
-        raise RuntimeError("Simulation produced no feasible routes. Reduce altitude constraints or inspect edge corridor heights.")
+        raise RuntimeError(
+            "Simulation produced no feasible routes. Reduce altitude constraints or inspect edge corridor heights."
+        )
     print_summary(results_df, conflict_count, orders, G)
     visualize_all(G, orders, results, results_df, used_edge_counts, cfg)
 
