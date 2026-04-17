@@ -32,3 +32,18 @@ dev = [
     "pytest>=9.0.3",
     "pytest-cov>=7.1.0",
 ]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+# This is the "Magic" for Flat Layouts
+[tool.hatch.build.targets.wheel]
+include = [
+    "drone_delivery_sf_realdata_visualization.py",
+    "simulator.py",
+    "config.py"
+]
+
+[project.scripts]
+simulate = "drone_delivery_sf_realdata_visualization:main"
