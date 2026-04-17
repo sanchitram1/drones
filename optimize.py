@@ -42,12 +42,13 @@ from config import (
 )
 from simulator import (
     GridTopology,
-    SFTopology,
     TurnProtocol,
     TurnLayerProtocol,
     IntersectionCubeProtocol,
     SpheraboutProtocol,
+    ZoneAdmissionController,
 )
+from realdata import load_real_data_bundle, sample_od_records
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -214,6 +215,40 @@ class DemandModel:
             pairs.append((nodes[i], nodes[j]))
 
         return pairs
+
+
+class SimulatorDemandModel:
+    """
+    Samples OD pairs using the same restaurant/census-to-node process as the
+    real-data simulator.
+    """
+
+    def __init__(
+        self,
+        realdata_bundle,
+        rng: Optional[np.random.Generator] = None,
+        origin_weight_col: Optional[str] = None,
+        dest_weight_col: Optional[str] = "pop_density",
+        dest_jitter_m: float = 100.0,
+    ):
+        self.bundle = realdata_bundle
+        self.rng = rng or np.random.default_rng(42)
+        self.origin_weight_col = origin_weight_col
+        self.dest_weight_col = dest_weight_col
+        self.dest_jitter_m = dest_jitter_m
+
+    def sample(self, n_samples: int) -> List[Tuple[int, int]]:
+        od_df = sample_od_records(
+            census=self.bundle.census,
+            restaurants=self.bundle.restaurants,
+            graph_or_topology=self.bundle.graph,
+            n_samples=n_samples,
+            rng=self.rng,
+            origin_weight_col=self.origin_weight_col,
+            dest_weight_col=self.dest_weight_col,
+            dest_jitter_m=self.dest_jitter_m,
+        )
+        return list(zip(od_df["origin_node"], od_df["dest_node"]))
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -613,9 +648,19 @@ class ThroughputOptimizer:
     print(result.summary())
     """
 
-    def __init__(self, config: ExperimentConfig):
+    def __init__(
+        self,
+        config: ExperimentConfig,
+        data_dir: str = "data",
+        restaurants_census_crs: str = "EPSG:4326",
+        graph_crs: str = "EPSG:32610",
+    ):
         self.cfg = config
         self.rng = np.random.default_rng(config.sim.seed)
+        self.data_dir = data_dir
+        self.restaurants_census_crs = restaurants_census_crs
+        self.graph_crs = graph_crs
+        self.realdata_bundle = None
 
         # Build topology (mirrors DroneDeliverySimulation._setup)
         if config.use_sf_data:
@@ -630,16 +675,12 @@ class ThroughputOptimizer:
 
     # ── topology helpers ──────────────────────────────────────────────
     def _setup_sf_topology(self):
-        from data_loader import (
-            load_sf_street_network,
-            load_sf_buildings,
-            compute_corridor_clearances,
+        self.realdata_bundle = load_real_data_bundle(
+            data_dir=self.data_dir,
+            restaurants_census_crs=self.restaurants_census_crs,
+            graph_crs=self.graph_crs,
         )
-
-        G = load_sf_street_network(self.cfg.sf)
-        buildings = load_sf_buildings(self.cfg.sf)
-        clearances = compute_corridor_clearances(buildings, G)
-        self.topology = SFTopology(G, clearances)
+        self.topology = self.realdata_bundle.topology
         self.n_bands = 8 if self.cfg.topology == "diagonal_overlay" else 4
 
     def _make_protocol(self, name: str) -> TurnProtocol:
@@ -666,8 +707,23 @@ class ThroughputOptimizer:
         mode: str = "gravity",
         origin_weights: Optional[Dict] = None,
         dest_weights: Optional[Dict] = None,
+        origin_weight_col: Optional[str] = None,
+        dest_weight_col: Optional[str] = "pop_density",
+        dest_jitter_m: float = 100.0,
         beta: float = 1e-4,
-    ) -> DemandModel:
+    ):
+        if mode == "simulator":
+            if self.realdata_bundle is None:
+                raise ValueError(
+                    "Simulator-consistent demand requires config.use_sf_data=True."
+                )
+            return SimulatorDemandModel(
+                self.realdata_bundle,
+                rng=self.rng,
+                origin_weight_col=origin_weight_col,
+                dest_weight_col=dest_weight_col,
+                dest_jitter_m=dest_jitter_m,
+            )
         return DemandModel(
             self.topology,
             mode=mode,
@@ -694,6 +750,9 @@ class ThroughputOptimizer:
         demand_mode: str = "gravity",
         origin_weights: Optional[Dict] = None,
         dest_weights: Optional[Dict] = None,
+        origin_weight_col: Optional[str] = None,
+        dest_weight_col: Optional[str] = "pop_density",
+        dest_jitter_m: float = 100.0,
         beta: float = 1e-4,
         verbose: bool = True,
     ) -> OptimizationResult:
@@ -704,7 +763,7 @@ class ThroughputOptimizer:
         ----------
         n_od_samples  : number of OD pairs sampled for path distribution
         K_max         : maximum tolerated number of conflicts per launch window
-        demand_mode   : 'gravity' or 'uniform'
+        demand_mode   : 'simulator', 'gravity', or 'uniform'
         origin_weights: node-keyed dict of origin attractiveness (restaurants)
         dest_weights  : node-keyed dict of destination attractiveness (population)
         beta          : distance decay coefficient for gravity model (1/m)
@@ -718,15 +777,31 @@ class ThroughputOptimizer:
 
         # 1. Sample OD pairs from demand model
         demand = self.build_demand_model(
-            demand_mode, origin_weights, dest_weights, beta
+            demand_mode,
+            origin_weights,
+            dest_weights,
+            origin_weight_col,
+            dest_weight_col,
+            dest_jitter_m,
+            beta,
         )
         od_pairs = demand.sample(n_od_samples)
 
         # 2. Build path distribution statistics
+        zone_controller = None
+        if self.cfg.sim.enable_admission_control:
+            n_zones = self.cfg.sf.zone_grid_size if self.cfg.use_sf_data else 5
+            zone_controller = ZoneAdmissionController(
+                self.topology,
+                n_zones_per_side=n_zones,
+                max_drones_per_zone=self.cfg.sim.zone_capacity,
+            )
+
         builder = PathDistributionBuilder(
             self.topology,
             self.cfg.altitude,
             self.n_bands,
+            zone_controller=zone_controller,
         )
         dist = builder.build(od_pairs, verbose=verbose)
 
@@ -740,7 +815,7 @@ class ThroughputOptimizer:
             alt_cfg=self.cfg.altitude,
             n_bands=self.n_bands,
             K_max=K_max,
-            zone_caps={},  # zone caps unused unless enabled via config
+            zone_caps=self._get_zone_caps(zone_controller),
         )
         result = evaluator.solve()
 
@@ -767,7 +842,14 @@ def compare_configs(
     demand_mode: str = "gravity",
     origin_weights: Optional[Dict] = None,
     dest_weights: Optional[Dict] = None,
+    origin_weight_col: Optional[str] = None,
+    dest_weight_col: Optional[str] = "pop_density",
+    dest_jitter_m: float = 100.0,
+    beta: float = 1e-4,
     base_config: Optional[ExperimentConfig] = None,
+    data_dir: str = "data",
+    restaurants_census_crs: str = "EPSG:4326",
+    graph_crs: str = "EPSG:32610",
     verbose: bool = True,
 ) -> pd.DataFrame:
     """
@@ -814,13 +896,22 @@ def compare_configs(
                 use_sf_data=base_config.use_sf_data,
             )
 
-            optimizer = ThroughputOptimizer(cfg)
+            optimizer = ThroughputOptimizer(
+                cfg,
+                data_dir=data_dir,
+                restaurants_census_crs=restaurants_census_crs,
+                graph_crs=graph_crs,
+            )
             result = optimizer.optimize(
                 n_od_samples=n_od_samples,
                 K_max=K_max,
                 demand_mode=demand_mode,
                 origin_weights=origin_weights,
                 dest_weights=dest_weights,
+                origin_weight_col=origin_weight_col,
+                dest_weight_col=dest_weight_col,
+                dest_jitter_m=dest_jitter_m,
+                beta=beta,
                 verbose=verbose,
             )
 
@@ -834,6 +925,9 @@ def compare_configs(
                     "lambda_conflict": round(result.lambda_conflict, 4),
                     "lambda_intersection": round(result.lambda_intersection, 4),
                     "lambda_headway": round(result.lambda_headway, 4),
+                    "lambda_zone": round(result.lambda_zone, 4)
+                    if np.isfinite(result.lambda_zone)
+                    else np.inf,
                     "Q": round(result.Q, 6),
                     "mean_path_m": round(result.mean_path_length_m, 1),
                     "mean_turns": round(result.mean_turns_per_path, 2),
@@ -850,6 +944,70 @@ def compare_configs(
     return df
 
 
+def compare_configuration_list(
+    configs: List[ExperimentConfig],
+    n_od_samples: int = 2000,
+    K_max: float = 50.0,
+    demand_mode: str = "gravity",
+    origin_weights: Optional[Dict] = None,
+    dest_weights: Optional[Dict] = None,
+    origin_weight_col: Optional[str] = None,
+    dest_weight_col: Optional[str] = "pop_density",
+    dest_jitter_m: float = 100.0,
+    beta: float = 1e-4,
+    data_dir: str = "data",
+    restaurants_census_crs: str = "EPSG:4326",
+    graph_crs: str = "EPSG:32610",
+    verbose: bool = True,
+) -> pd.DataFrame:
+    rows = []
+    for cfg in configs:
+        optimizer = ThroughputOptimizer(
+            cfg,
+            data_dir=data_dir,
+            restaurants_census_crs=restaurants_census_crs,
+            graph_crs=graph_crs,
+        )
+        result = optimizer.optimize(
+            n_od_samples=n_od_samples,
+            K_max=K_max,
+            demand_mode=demand_mode,
+            origin_weights=origin_weights,
+            dest_weights=dest_weights,
+            origin_weight_col=origin_weight_col,
+            dest_weight_col=dest_weight_col,
+            dest_jitter_m=dest_jitter_m,
+            beta=beta,
+            verbose=verbose,
+        )
+        rows.append(
+            {
+                "topology": result.topology,
+                "protocol": result.turning_protocol,
+                "lambda_star": round(result.lambda_star, 4),
+                "throughput_hr": round(result.throughput_per_hour(), 1),
+                "binding_constraint": result.binding_constraint,
+                "lambda_conflict": round(result.lambda_conflict, 4),
+                "lambda_intersection": round(result.lambda_intersection, 4),
+                "lambda_headway": round(result.lambda_headway, 4),
+                "lambda_zone": round(result.lambda_zone, 4)
+                if np.isfinite(result.lambda_zone)
+                else np.inf,
+                "Q": round(result.Q, 6),
+                "mean_path_m": round(result.mean_path_length_m, 1),
+                "mean_turns": round(result.mean_turns_per_path, 2),
+                "n_turning_nodes": result.n_turning_nodes,
+                "n_lanes": result.n_active_edge_alt_lanes,
+            }
+        )
+
+    return (
+        pd.DataFrame(rows)
+        .sort_values("lambda_star", ascending=False)
+        .reset_index(drop=True)
+    )
+
+
 # ══════════════════════════════════════════════════════════════════════
 # 7.  SENSITIVITY ANALYSIS
 # ══════════════════════════════════════════════════════════════════════
@@ -860,6 +1018,13 @@ def sensitivity_analysis(
     K_max_values: List[float] = (10, 25, 50, 100, 200),
     n_od_samples: int = 1500,
     demand_mode: str = "gravity",
+    origin_weight_col: Optional[str] = None,
+    dest_weight_col: Optional[str] = "pop_density",
+    dest_jitter_m: float = 100.0,
+    beta: float = 1e-4,
+    data_dir: str = "data",
+    restaurants_census_crs: str = "EPSG:4326",
+    graph_crs: str = "EPSG:32610",
     verbose: bool = False,
 ) -> pd.DataFrame:
     """
@@ -869,8 +1034,19 @@ def sensitivity_analysis(
 
     Returns a DataFrame with (K_max, lambda_star, binding_constraint, lambda_conflict).
     """
-    optimizer = ThroughputOptimizer(config)
-    demand = optimizer.build_demand_model(demand_mode)
+    optimizer = ThroughputOptimizer(
+        config,
+        data_dir=data_dir,
+        restaurants_census_crs=restaurants_census_crs,
+        graph_crs=graph_crs,
+    )
+    demand = optimizer.build_demand_model(
+        demand_mode,
+        origin_weight_col=origin_weight_col,
+        dest_weight_col=dest_weight_col,
+        dest_jitter_m=dest_jitter_m,
+        beta=beta,
+    )
     od_pairs = demand.sample(n_od_samples)
 
     builder = PathDistributionBuilder(
@@ -913,6 +1089,7 @@ def sensitivity_analysis(
                 "lambda_conflict": round(lc1, 4),
                 "lambda_intersection": round(lc2, 4),
                 "lambda_headway": round(lc3, 4),
+                "lambda_zone": round(lc4, 4) if np.isfinite(lc4) else np.inf,
             }
         )
         if verbose:

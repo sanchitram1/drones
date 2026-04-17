@@ -1,16 +1,29 @@
+from __future__ import annotations
+
 import argparse
+import json
 import os
 import sys
+from dataclasses import asdict
 from pathlib import Path
 
+import pandas as pd
 
-TURN_PROTOCOL_CHOICES = (
+
+SIM_TURN_PROTOCOL_CHOICES = (
     "simple",
     "turn_layer",
     "intersection_cube",
     "sphereabout",
 )
-DEMAND_MODEL_CHOICES = ("time-series", "fixed-count", "csv")
+OPTIMIZER_PROTOCOL_CHOICES = (
+    "turn_layer",
+    "intersection_cube",
+    "sphereabout",
+)
+TOPOLOGY_CHOICES = ("grid", "diagonal_overlay")
+SIM_DEMAND_MODEL_CHOICES = ("time-series", "fixed-count", "csv")
+OPTIMIZE_DEMAND_MODEL_CHOICES = ("simulator", "gravity", "uniform")
 
 
 def normalize_choice(value: str) -> str:
@@ -19,20 +32,40 @@ def normalize_choice(value: str) -> str:
 
 def parse_turn_protocol(value: str) -> str:
     normalized = normalize_choice(value)
-    if normalized not in TURN_PROTOCOL_CHOICES:
-        choices = ", ".join(TURN_PROTOCOL_CHOICES)
+    if normalized not in SIM_TURN_PROTOCOL_CHOICES:
+        choices = ", ".join(SIM_TURN_PROTOCOL_CHOICES)
         raise argparse.ArgumentTypeError(
             f"Unsupported turn protocol '{value}'. Choose from: {choices}."
         )
     return normalized
 
 
+def parse_optimizer_protocol(value: str) -> str:
+    normalized = normalize_choice(value)
+    if normalized not in OPTIMIZER_PROTOCOL_CHOICES:
+        choices = ", ".join(OPTIMIZER_PROTOCOL_CHOICES)
+        raise argparse.ArgumentTypeError(
+            f"Unsupported optimizer protocol '{value}'. Choose from: {choices}."
+        )
+    return normalized
+
+
 def parse_demand_model(value: str) -> str:
     normalized = normalize_choice(value).replace("_", "-")
-    if normalized not in DEMAND_MODEL_CHOICES:
-        choices = ", ".join(DEMAND_MODEL_CHOICES)
+    if normalized not in SIM_DEMAND_MODEL_CHOICES:
+        choices = ", ".join(SIM_DEMAND_MODEL_CHOICES)
         raise argparse.ArgumentTypeError(
             f"Unsupported demand model '{value}'. Choose from: {choices}."
+        )
+    return normalized
+
+
+def parse_optimizer_demand_model(value: str) -> str:
+    normalized = normalize_choice(value)
+    if normalized not in OPTIMIZE_DEMAND_MODEL_CHOICES:
+        choices = ", ".join(OPTIMIZE_DEMAND_MODEL_CHOICES)
+        raise argparse.ArgumentTypeError(
+            f"Unsupported optimizer demand model '{value}'. Choose from: {choices}."
         )
     return normalized
 
@@ -46,21 +79,67 @@ def parse_optional_column(value: str | None) -> str | None:
     return text
 
 
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        prog="simulate",
-        description="Run the San Francisco real-data drone simulation CLI.",
-    )
-    subparsers = parser.add_subparsers(dest="command")
+def parse_config_spec(value: str) -> tuple[str, str]:
+    try:
+        topology, protocol = value.split(":", 1)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            "Configuration must look like 'grid:turn_layer'."
+        ) from exc
 
-    run_parser = subparsers.add_parser(
-        "run",
-        help="Run the real-data simulation from drone_delivery_sf_realdata_visualization.py",
-    )
-    add_run_arguments(run_parser)
-    run_parser.set_defaults(handler=handle_run)
+    topology = normalize_choice(topology)
+    protocol = parse_optimizer_protocol(protocol)
+    if topology not in TOPOLOGY_CHOICES:
+        choices = ", ".join(TOPOLOGY_CHOICES)
+        raise argparse.ArgumentTypeError(
+            f"Unsupported topology '{topology}'. Choose from: {choices}."
+        )
+    return topology, protocol
 
-    return parser
+
+def parse_k_max_values(value: str) -> list[float]:
+    pieces = [piece.strip() for piece in value.split(",") if piece.strip()]
+    if not pieces:
+        raise argparse.ArgumentTypeError(
+            "K-max values must be a comma-separated list like '10,25,50,100'."
+        )
+    try:
+        values = [float(piece) for piece in pieces]
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            "K-max values must be numeric."
+        ) from exc
+    return values
+
+
+def resolve_output_prefix(path_value: str | Path) -> Path:
+    path = Path(path_value)
+    if path.suffix:
+        path = path.with_suffix("")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def save_json(payload: dict, path: str | Path) -> str:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w") as f:
+        json.dump(payload, f, indent=2, sort_keys=True)
+    return str(path)
+
+
+def save_dataframe(df: pd.DataFrame, path: str | Path) -> str:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    df.to_csv(path, index=False)
+    return str(path)
+
+
+def save_figure(fig, path: str | Path) -> str:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(path, dpi=150, bbox_inches="tight")
+    return str(path)
 
 
 def add_run_arguments(parser: argparse.ArgumentParser) -> None:
@@ -129,13 +208,13 @@ def add_run_arguments(parser: argparse.ArgumentParser) -> None:
         "--peak-start-min",
         type=float,
         default=45.0,
-        help="Peak-window start time in minutes.",
+        help="Peak-window start time in minutes from simulation start.",
     )
     parser.add_argument(
         "--peak-end-min",
         type=float,
         default=95.0,
-        help="Peak-window end time in minutes.",
+        help="Peak-window end time in minutes from simulation start.",
     )
     parser.add_argument(
         "--origin-weight-col",
@@ -273,6 +352,174 @@ def add_run_arguments(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def add_optimizer_common_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--data-dir",
+        default="data",
+        help="Directory containing the exported SF CSVs used by the simulator.",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="Random seed used for OD sampling in the optimizer.",
+    )
+    parser.add_argument(
+        "--demand-model",
+        type=parse_optimizer_demand_model,
+        default="simulator",
+        help="Demand model for optimization: simulator, gravity, or uniform.",
+    )
+    parser.add_argument(
+        "--samples",
+        type=int,
+        default=2000,
+        help="Number of OD pairs sampled for the path distribution.",
+    )
+    parser.add_argument(
+        "--K-max",
+        type=float,
+        default=50.0,
+        help="Maximum tolerated conflicts per launch window.",
+    )
+    parser.add_argument(
+        "--launch-window-s",
+        type=float,
+        default=300.0,
+        help="Launch window used in the conflict-budget calculation.",
+    )
+    parser.add_argument(
+        "--origin-weight-col",
+        type=parse_optional_column,
+        default=None,
+        help="Restaurant column used to weight origin sampling in simulator demand mode.",
+    )
+    parser.add_argument(
+        "--dest-weight-col",
+        type=parse_optional_column,
+        default="pop_density",
+        help="Census column used to weight destination sampling in simulator demand mode.",
+    )
+    parser.add_argument(
+        "--dest-jitter-m",
+        type=float,
+        default=100.0,
+        help="Gaussian destination jitter in meters for simulator demand mode.",
+    )
+    parser.add_argument(
+        "--beta",
+        type=float,
+        default=1e-4,
+        help="Distance-decay coefficient for gravity demand mode.",
+    )
+    parser.add_argument(
+        "--abstract",
+        action="store_true",
+        help="Use the abstract grid topology instead of the exported SF graph.",
+    )
+    parser.add_argument(
+        "--enable-zone-capacity",
+        action="store_true",
+        help="Enable the optimizer's zone-capacity constraint.",
+    )
+    parser.add_argument(
+        "--zone-capacity",
+        type=int,
+        default=50,
+        help="Maximum drones allowed per zone when zone capacity is enabled.",
+    )
+    parser.add_argument(
+        "--zone-grid-size",
+        type=int,
+        default=5,
+        help="Zones per side for the zone-capacity model.",
+    )
+    parser.add_argument(
+        "--show",
+        action="store_true",
+        help="Display optimizer figures interactively.",
+    )
+    parser.add_argument(
+        "--save-figure",
+        type=Path,
+        help="Base path or prefix for saved optimizer figures.",
+    )
+    parser.add_argument(
+        "--save-results",
+        type=Path,
+        help="Base path or prefix for saved optimizer CSV/JSON outputs.",
+    )
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="simulate",
+        description="Run the drone simulation and analytical optimizer CLI.",
+    )
+    subparsers = parser.add_subparsers(dest="command")
+
+    run_parser = subparsers.add_parser(
+        "run",
+        help="Run the real-data simulation from drone_delivery_sf_realdata_visualization.py",
+    )
+    add_run_arguments(run_parser)
+    run_parser.set_defaults(handler=handle_run)
+
+    optimize_parser = subparsers.add_parser(
+        "optimize",
+        help="Run the analytical throughput optimizer.",
+    )
+    optimize_subparsers = optimize_parser.add_subparsers(dest="optimize_command")
+
+    optimize_run_parser = optimize_subparsers.add_parser(
+        "run",
+        help="Run the optimizer for one configuration.",
+    )
+    optimize_run_parser.add_argument(
+        "--config",
+        type=parse_config_spec,
+        required=True,
+        help="Configuration spec like 'grid:turn_layer'.",
+    )
+    add_optimizer_common_arguments(optimize_run_parser)
+    optimize_run_parser.set_defaults(handler=handle_optimize_run)
+
+    optimize_compare_parser = optimize_subparsers.add_parser(
+        "compare",
+        help="Compare two or more optimizer configurations.",
+    )
+    optimize_compare_parser.add_argument(
+        "--config",
+        type=parse_config_spec,
+        action="append",
+        required=True,
+        help="Configuration spec like 'grid:turn_layer'. Repeat this flag to compare multiple configurations.",
+    )
+    add_optimizer_common_arguments(optimize_compare_parser)
+    optimize_compare_parser.set_defaults(handler=handle_optimize_compare)
+
+    optimize_sensitivity_parser = optimize_subparsers.add_parser(
+        "sensitivity",
+        help="Sweep K_max and inspect which optimizer constraint binds.",
+    )
+    optimize_sensitivity_parser.add_argument(
+        "--config",
+        type=parse_config_spec,
+        required=True,
+        help="Configuration spec like 'grid:turn_layer'.",
+    )
+    add_optimizer_common_arguments(optimize_sensitivity_parser)
+    optimize_sensitivity_parser.add_argument(
+        "--K-max-values",
+        type=parse_k_max_values,
+        default=[10.0, 25.0, 50.0, 100.0, 200.0],
+        help="Comma-separated list of conflict budgets to sweep.",
+    )
+    optimize_sensitivity_parser.set_defaults(handler=handle_optimize_sensitivity)
+
+    return parser
+
+
 def handle_run(args: argparse.Namespace) -> int:
     if not args.show:
         os.environ.setdefault("MPLBACKEND", "Agg")
@@ -325,11 +572,198 @@ def handle_run(args: argparse.Namespace) -> int:
     return 0
 
 
+def build_optimizer_config(config_spec: tuple[str, str], args: argparse.Namespace):
+    from config import ExperimentConfig, SimConfig as OptimizerSimConfig, SFConfig
+
+    topology, protocol = config_spec
+    sim_cfg = OptimizerSimConfig(
+        seed=args.seed,
+        launch_window=float(args.launch_window_s),
+        enable_admission_control=bool(args.enable_zone_capacity),
+        zone_capacity=int(args.zone_capacity),
+    )
+    sf_cfg = SFConfig(zone_grid_size=int(args.zone_grid_size))
+    return ExperimentConfig(
+        topology=topology,
+        turning_protocol=protocol,
+        sim=sim_cfg,
+        sf=sf_cfg,
+        use_sf_data=not args.abstract,
+    )
+
+
+def handle_optimize_run(args: argparse.Namespace) -> int:
+    if not args.show:
+        os.environ.setdefault("MPLBACKEND", "Agg")
+
+    from optimize import ThroughputOptimizer
+    from optimize_viz import plot_optimization_result
+
+    cfg = build_optimizer_config(args.config, args)
+    optimizer = ThroughputOptimizer(cfg, data_dir=str(args.data_dir))
+    result = optimizer.optimize(
+        n_od_samples=args.samples,
+        K_max=args.K_max,
+        demand_mode=args.demand_model,
+        origin_weight_col=args.origin_weight_col,
+        dest_weight_col=args.dest_weight_col,
+        dest_jitter_m=args.dest_jitter_m,
+        beta=args.beta,
+        verbose=True,
+    )
+
+    saved_paths = {}
+    if args.save_results is not None:
+        prefix = resolve_output_prefix(args.save_results)
+        result_payload = asdict(result)
+        result_payload["throughput_hr"] = result.throughput_per_hour()
+        saved_paths["summary_json"] = save_json(
+            result_payload,
+            prefix.parent / f"{prefix.name}_summary.json",
+        )
+        saved_paths["summary_csv"] = save_dataframe(
+            pd.DataFrame([result_payload]),
+            prefix.parent / f"{prefix.name}_summary.csv",
+        )
+
+    if args.show or args.save_figure is not None:
+        fig = plot_optimization_result(result)
+        if args.save_figure is not None:
+            prefix = resolve_output_prefix(args.save_figure)
+            saved_paths["figure_png"] = save_figure(
+                fig,
+                prefix.parent / f"{prefix.name}_run.png",
+            )
+        if args.show:
+            import matplotlib.pyplot as plt
+
+            plt.show()
+        else:
+            import matplotlib.pyplot as plt
+
+            plt.close(fig)
+
+    for label, path in saved_paths.items():
+        print(f"Saved {label}: {path}")
+    return 0
+
+
+def handle_optimize_compare(args: argparse.Namespace) -> int:
+    if len(args.config) < 2:
+        raise SystemExit("simulate optimize compare requires at least two --config values.")
+    if not args.show:
+        os.environ.setdefault("MPLBACKEND", "Agg")
+
+    from optimize import compare_configuration_list
+    from optimize_viz import plot_optimization_comparison
+
+    configs = [build_optimizer_config(spec, args) for spec in args.config]
+    df = compare_configuration_list(
+        configs=configs,
+        n_od_samples=args.samples,
+        K_max=args.K_max,
+        demand_mode=args.demand_model,
+        origin_weight_col=args.origin_weight_col,
+        dest_weight_col=args.dest_weight_col,
+        dest_jitter_m=args.dest_jitter_m,
+        beta=args.beta,
+        data_dir=str(args.data_dir),
+        verbose=True,
+    )
+    print("\n" + df.to_string(index=False))
+
+    saved_paths = {}
+    if args.save_results is not None:
+        prefix = resolve_output_prefix(args.save_results)
+        saved_paths["comparison_csv"] = save_dataframe(
+            df,
+            prefix.parent / f"{prefix.name}_compare.csv",
+        )
+
+    if args.show or args.save_figure is not None:
+        fig = plot_optimization_comparison(df)
+        if args.save_figure is not None:
+            prefix = resolve_output_prefix(args.save_figure)
+            saved_paths["figure_png"] = save_figure(
+                fig,
+                prefix.parent / f"{prefix.name}_compare.png",
+            )
+        if args.show:
+            import matplotlib.pyplot as plt
+
+            plt.show()
+        else:
+            import matplotlib.pyplot as plt
+
+            plt.close(fig)
+
+    for label, path in saved_paths.items():
+        print(f"Saved {label}: {path}")
+    return 0
+
+
+def handle_optimize_sensitivity(args: argparse.Namespace) -> int:
+    if not args.show:
+        os.environ.setdefault("MPLBACKEND", "Agg")
+
+    from optimize import sensitivity_analysis
+    from optimize_viz import plot_optimization_sensitivity
+
+    cfg = build_optimizer_config(args.config, args)
+    df = sensitivity_analysis(
+        config=cfg,
+        K_max_values=args.K_max_values,
+        n_od_samples=args.samples,
+        demand_mode=args.demand_model,
+        origin_weight_col=args.origin_weight_col,
+        dest_weight_col=args.dest_weight_col,
+        dest_jitter_m=args.dest_jitter_m,
+        beta=args.beta,
+        data_dir=str(args.data_dir),
+        verbose=True,
+    )
+    print("\n" + df.to_string(index=False))
+
+    saved_paths = {}
+    if args.save_results is not None:
+        prefix = resolve_output_prefix(args.save_results)
+        saved_paths["sensitivity_csv"] = save_dataframe(
+            df,
+            prefix.parent / f"{prefix.name}_sensitivity.csv",
+        )
+
+    if args.show or args.save_figure is not None:
+        topo, proto = args.config
+        fig = plot_optimization_sensitivity(
+            df,
+            title=f"Sensitivity: {topo} / {proto}",
+        )
+        if args.save_figure is not None:
+            prefix = resolve_output_prefix(args.save_figure)
+            saved_paths["figure_png"] = save_figure(
+                fig,
+                prefix.parent / f"{prefix.name}_sensitivity.png",
+            )
+        if args.show:
+            import matplotlib.pyplot as plt
+
+            plt.show()
+        else:
+            import matplotlib.pyplot as plt
+
+            plt.close(fig)
+
+    for label, path in saved_paths.items():
+        print(f"Saved {label}: {path}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     argv = list(sys.argv[1:] if argv is None else argv)
 
-    if argv and argv[0] not in {"run", "-h", "--help"}:
+    top_level_commands = {"run", "optimize", "-h", "--help"}
+    if argv and argv[0] not in top_level_commands:
         argv = ["run", *argv]
 
     if not argv:

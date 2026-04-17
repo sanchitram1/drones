@@ -10,7 +10,14 @@ import numpy as np
 import pandas as pd
 from matplotlib import cm
 from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
-from pyproj import Transformer
+
+from realdata import (
+    build_graph as build_realdata_graph,
+    generate_orders as generate_realdata_orders,
+    load_orders_csv as load_orders_csv_shared,
+    load_real_data as load_realdata,
+    project_latlon_to_graph_xy as project_latlon_to_graph_xy_shared,
+)
 
 # ================================================================
 # San Francisco Drone Delivery Simulation (Python version)
@@ -115,83 +122,24 @@ def safe_corridor_height_ft(edges: pd.DataFrame) -> np.ndarray:
 def project_latlon_to_graph_xy(
     lat: np.ndarray, lon: np.ndarray, cfg: SimConfig
 ) -> Tuple[np.ndarray, np.ndarray]:
-    transformer = Transformer.from_crs(
-        cfg.restaurants_census_crs, cfg.graph_crs, always_xy=True
+    return project_latlon_to_graph_xy_shared(
+        lat,
+        lon,
+        restaurants_census_crs=cfg.restaurants_census_crs,
+        graph_crs=cfg.graph_crs,
     )
-    x, y = transformer.transform(lon, lat)
-    return np.asarray(x), np.asarray(y)
 
 
 def load_real_data(cfg: SimConfig):
-    data_dir = Path(cfg.data_dir)
-    nodes_path = data_dir / "sf_nodes.csv"
-    edges_path = data_dir / "sf_edges.csv"
-    census_path = data_dir / "sf_census.csv"
-    restaurants_path = data_dir / "sf_restaurants.csv"
-
-    missing = [
-        str(p)
-        for p in [nodes_path, edges_path, census_path, restaurants_path]
-        if not p.exists()
-    ]
-    if missing:
-        raise FileNotFoundError(
-            "Missing required exported files:\n  - " + "\n  - ".join(missing)
-        )
-
-    nodes = pd.read_csv(nodes_path)
-    edges = pd.read_csv(edges_path)
-    census = pd.read_csv(census_path)
-    restaurants = pd.read_csv(restaurants_path)
-
-    nodes["node_id"] = normalize_id_series(nodes["node_id"])
-    edges["u"] = normalize_id_series(edges["u"])
-    edges["v"] = normalize_id_series(edges["v"])
-
-    # Harmonize lengths and clean edges
-    node_set = set(nodes["node_id"])
-    edges = edges[edges["u"].isin(node_set) & edges["v"].isin(node_set)].copy()
-    edges["length_m"] = pd.to_numeric(edges["length_m"], errors="coerce")
-    edges = edges.dropna(subset=["length_m"])
-    edges = edges[edges["u"] != edges["v"]]
-
-    # projected xy for nodes already in meters; restaurants/census likely lat/lon
-    if not {"lat", "lon"}.issubset(restaurants.columns):
-        raise ValueError("sf_restaurants.csv must contain lat/lon columns")
-    if not {"lat", "lon"}.issubset(census.columns):
-        raise ValueError("sf_census.csv must contain lat/lon columns")
-
-    restaurants["x"], restaurants["y"] = project_latlon_to_graph_xy(
-        restaurants["lat"].to_numpy(), restaurants["lon"].to_numpy(), cfg
+    return load_realdata(
+        data_dir=cfg.data_dir,
+        restaurants_census_crs=cfg.restaurants_census_crs,
+        graph_crs=cfg.graph_crs,
     )
-    census["x"], census["y"] = project_latlon_to_graph_xy(
-        census["lat"].to_numpy(), census["lon"].to_numpy(), cfg
-    )
-
-    return nodes, edges, census, restaurants
 
 
 def build_graph(nodes: pd.DataFrame, edges: pd.DataFrame) -> nx.Graph:
-    G = nx.Graph()
-    for row in nodes.itertuples(index=False):
-        G.add_node(row.node_id, x=float(row.x), y=float(row.y))
-
-    corridor_ft = safe_corridor_height_ft(edges)
-    for row, height_ft in zip(edges.itertuples(index=False), corridor_ft):
-        if G.has_edge(row.u, row.v):
-            # keep the shortest parallel edge
-            if float(row.length_m) < G[row.u][row.v]["length_m"]:
-                G[row.u][row.v].update(
-                    length_m=float(row.length_m), corridor_height_ft=float(height_ft)
-                )
-        else:
-            G.add_edge(
-                row.u,
-                row.v,
-                length_m=float(row.length_m),
-                corridor_height_ft=float(height_ft),
-            )
-    return G
+    return build_realdata_graph(nodes, edges)
 
 
 def nearest_node_ids(
@@ -261,89 +209,26 @@ def compute_sampling_weights(
 def generate_orders(
     census: pd.DataFrame, restaurants: pd.DataFrame, G: nx.Graph, cfg: SimConfig
 ) -> pd.DataFrame:
-    rng = np.random.default_rng(cfg.random_seed)
-    node_ids = np.array(list(G.nodes()))
-    nodes_xy = np.array([[G.nodes[n]["x"], G.nodes[n]["y"]] for n in node_ids])
     demand_model = resolve_demand_model(cfg.demand_model)
 
     if demand_model == "csv":
         raise ValueError("CSV-driven demand must be loaded via load_orders_csv().")
-
-    if demand_model == "fixed-count":
-        if cfg.n_orders_override is None or cfg.n_orders_override <= 0:
-            raise ValueError(
-                "Fixed-count demand requires --n-orders / n_orders_override > 0."
-            )
-        req_times = np.sort(rng.uniform(0, cfg.sim_duration_s, cfg.n_orders_override))
-        n_orders = cfg.n_orders_override
-    else:
-        n_steps = cfg.sim_duration_s // cfg.dt_s
-        req_times = []
-        for t_idx in range(n_steps):
-            t0 = t_idx * cfg.dt_s
-            lam_per_min = cfg.base_lambda_per_min
-            if cfg.peak_window_s[0] <= t0 < cfg.peak_window_s[1]:
-                lam_per_min *= cfg.peak_multiplier
-            # slight sinusoid to avoid a flat trace
-            lam_per_min *= 1.0 + 0.25 * math.sin(2 * math.pi * t0 / cfg.sim_duration_s)
-            arrivals = rng.poisson(max(lam_per_min, 0.05) * (cfg.dt_s / 60.0))
-            if arrivals > 0:
-                req_times.extend(t0 + rng.uniform(0, cfg.dt_s, arrivals))
-        req_times = np.sort(np.asarray(req_times))
-        n_orders = len(req_times)
-
-    if n_orders == 0:
-        return pd.DataFrame(
-            columns=[
-                "order_id",
-                "request_time_s",
-                "origin_node",
-                "dest_node",
-                "orig_x",
-                "orig_y",
-                "dest_x",
-                "dest_y",
-            ]
-        )
-
-    origin_weights = compute_sampling_weights(
-        restaurants, cfg.origin_weight_col, "Origin"
+    return generate_realdata_orders(
+        census=census,
+        restaurants=restaurants,
+        graph_or_topology=G,
+        demand_model=demand_model,
+        sim_duration_s=cfg.sim_duration_s,
+        dt_s=cfg.dt_s,
+        base_lambda_per_min=cfg.base_lambda_per_min,
+        peak_multiplier=cfg.peak_multiplier,
+        peak_window_s=cfg.peak_window_s,
+        n_orders_override=cfg.n_orders_override,
+        origin_weight_col=cfg.origin_weight_col,
+        dest_weight_col=cfg.dest_weight_col,
+        dest_jitter_m=cfg.dest_jitter_m,
+        random_seed=cfg.random_seed,
     )
-    rest_idx = rng.choice(len(restaurants), size=n_orders, p=origin_weights)
-    origin_xy = restaurants[["x", "y"]].to_numpy()[rest_idx]
-
-    dest_weights = compute_sampling_weights(census, cfg.dest_weight_col, "Destination")
-    dest_idx = rng.choice(len(census), size=n_orders, p=dest_weights)
-    dest_xy = census[["x", "y"]].to_numpy()[dest_idx].copy()
-    # Add spatial jitter so deliveries are not all at tract centroids.
-    dest_xy += rng.normal(0.0, cfg.dest_jitter_m, size=dest_xy.shape)
-
-    origin_nodes = nearest_node_ids(origin_xy, nodes_xy, node_ids)
-    dest_nodes = nearest_node_ids(dest_xy, nodes_xy, node_ids)
-
-    # avoid same-node trips
-    same = origin_nodes == dest_nodes
-    while np.any(same):
-        resample = rng.choice(len(census), size=same.sum(), p=dest_weights)
-        dest_xy[same] = census[["x", "y"]].to_numpy()[resample] + rng.normal(
-            0.0, cfg.dest_jitter_m, size=(same.sum(), 2)
-        )
-        dest_nodes[same] = nearest_node_ids(dest_xy[same], nodes_xy, node_ids)
-        same = origin_nodes == dest_nodes
-
-    orders = pd.DataFrame(
-        {
-            "order_id": np.arange(n_orders),
-            "request_time_s": req_times,
-            "origin_node": origin_nodes,
-            "dest_node": dest_nodes,
-            "orig_x": origin_xy[:, 0],
-            "orig_y": origin_xy[:, 1],
-            "dest_x": dest_xy[:, 0],
-            "dest_y": dest_xy[:, 1],
-        }
-    )
-    return orders
 
 
 def generate_time_series_orders(
@@ -353,52 +238,7 @@ def generate_time_series_orders(
 
 
 def load_orders_csv(orders_path: str | Path, G: nx.Graph) -> pd.DataFrame:
-    orders = pd.read_csv(orders_path).copy()
-
-    if "request_time_s" not in orders.columns and "request_time" in orders.columns:
-        orders = orders.rename(columns={"request_time": "request_time_s"})
-
-    required = {"origin_node", "dest_node", "request_time_s"}
-    missing = sorted(required - set(orders.columns))
-    if missing:
-        raise ValueError(
-            f"Orders CSV is missing required columns: {', '.join(missing)}."
-        )
-
-    if "order_id" not in orders.columns:
-        orders["order_id"] = np.arange(len(orders))
-
-    orders["origin_node"] = normalize_id_series(orders["origin_node"])
-    orders["dest_node"] = normalize_id_series(orders["dest_node"])
-    orders["request_time_s"] = pd.to_numeric(orders["request_time_s"], errors="coerce")
-
-    if orders["request_time_s"].isna().any():
-        raise ValueError("Orders CSV contains non-numeric request_time_s values.")
-
-    graph_nodes = set(G.nodes())
-    unknown_origins = sorted(set(orders["origin_node"]) - graph_nodes)
-    unknown_destinations = sorted(set(orders["dest_node"]) - graph_nodes)
-    if unknown_origins or unknown_destinations:
-        problems = []
-        if unknown_origins:
-            problems.append(f"unknown origin nodes: {', '.join(unknown_origins[:5])}")
-        if unknown_destinations:
-            problems.append(
-                f"unknown destination nodes: {', '.join(unknown_destinations[:5])}"
-            )
-        raise ValueError(
-            "Orders CSV references nodes not present in the graph: "
-            + "; ".join(problems)
-        )
-
-    if not {"orig_x", "orig_y"}.issubset(orders.columns):
-        orders["orig_x"] = orders["origin_node"].map(lambda n: G.nodes[n]["x"])
-        orders["orig_y"] = orders["origin_node"].map(lambda n: G.nodes[n]["y"])
-    if not {"dest_x", "dest_y"}.issubset(orders.columns):
-        orders["dest_x"] = orders["dest_node"].map(lambda n: G.nodes[n]["x"])
-        orders["dest_y"] = orders["dest_node"].map(lambda n: G.nodes[n]["y"])
-
-    return orders
+    return load_orders_csv_shared(orders_path, G)
 
 
 def edge_key(u: str, v: str) -> Tuple[str, str]:

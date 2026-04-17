@@ -44,6 +44,9 @@ build-backend = "hatchling.build"
 include = [
     "cli.py",
     "drone_delivery_sf_realdata_visualization.py",
+    "optimize.py",
+    "optimize_viz.py",
+    "realdata.py",
     "simulator.py",
     "config.py"
 ]
