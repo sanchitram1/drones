@@ -350,9 +350,7 @@ class SpheraboutProtocol(TurnProtocol):
         self._heading_to_sphere_point(
             (entry_heading + 180) % 360, intersection_pos, entry_alt
         )
-        self._heading_to_sphere_point(
-            exit_heading, intersection_pos, exit_alt
-        )
+        self._heading_to_sphere_point(exit_heading, intersection_pos, exit_alt)
 
         # Generate intermediate arc points (CCW on the sphere surface)
         n_arc_pts = 8

@@ -165,8 +165,7 @@ def plot_optimization_result(result) -> plt.Figure:
 def plot_optimization_comparison(df: pd.DataFrame) -> plt.Figure:
     df = df.copy()
     labels = [
-        _config_label(row["topology"], row["protocol"])
-        for _, row in df.iterrows()
+        _config_label(row["topology"], row["protocol"]) for _, row in df.iterrows()
     ]
     x = np.arange(len(df))
 

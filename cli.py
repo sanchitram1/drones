@@ -106,9 +106,7 @@ def parse_k_max_values(value: str) -> list[float]:
     try:
         values = [float(piece) for piece in pieces]
     except ValueError as exc:
-        raise argparse.ArgumentTypeError(
-            "K-max values must be numeric."
-        ) from exc
+        raise argparse.ArgumentTypeError("K-max values must be numeric.") from exc
     return values
 
 
@@ -650,7 +648,9 @@ def handle_optimize_run(args: argparse.Namespace) -> int:
 
 def handle_optimize_compare(args: argparse.Namespace) -> int:
     if len(args.config) < 2:
-        raise SystemExit("simulate optimize compare requires at least two --config values.")
+        raise SystemExit(
+            "simulate optimize compare requires at least two --config values."
+        )
     if not args.show:
         os.environ.setdefault("MPLBACKEND", "Agg")
 

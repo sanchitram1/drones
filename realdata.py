@@ -255,7 +255,9 @@ def sample_od_records(
         )
 
     rng = rng or np.random.default_rng(42)
-    graph = graph_or_topology.G if hasattr(graph_or_topology, "G") else graph_or_topology
+    graph = (
+        graph_or_topology.G if hasattr(graph_or_topology, "G") else graph_or_topology
+    )
     node_ids = np.array(list(graph.nodes()))
     nodes_xy = np.array([[graph.nodes[n]["x"], graph.nodes[n]["y"]] for n in node_ids])
 
@@ -317,15 +319,11 @@ def generate_request_times(
 
     if demand_model == "fixed-count":
         if n_orders_override is None or n_orders_override <= 0:
-            raise ValueError(
-                "Fixed-count demand requires n_orders_override > 0."
-            )
+            raise ValueError("Fixed-count demand requires n_orders_override > 0.")
         return np.sort(rng.uniform(0, sim_duration_s, n_orders_override))
 
     if demand_model != "time-series":
-        raise ValueError(
-            f"Unsupported generated demand model '{demand_model}'."
-        )
+        raise ValueError(f"Unsupported generated demand model '{demand_model}'.")
 
     n_steps = sim_duration_s // dt_s
     req_times = []
@@ -406,16 +404,16 @@ def load_orders_csv(orders_path: str | Path, graph_or_topology) -> pd.DataFrame:
     if orders["request_time_s"].isna().any():
         raise ValueError("Orders CSV contains non-numeric request_time_s values.")
 
-    graph = graph_or_topology.G if hasattr(graph_or_topology, "G") else graph_or_topology
+    graph = (
+        graph_or_topology.G if hasattr(graph_or_topology, "G") else graph_or_topology
+    )
     graph_nodes = set(graph.nodes())
     unknown_origins = sorted(set(orders["origin_node"]) - graph_nodes)
     unknown_destinations = sorted(set(orders["dest_node"]) - graph_nodes)
     if unknown_origins or unknown_destinations:
         problems = []
         if unknown_origins:
-            problems.append(
-                f"unknown origin nodes: {', '.join(unknown_origins[:5])}"
-            )
+            problems.append(f"unknown origin nodes: {', '.join(unknown_origins[:5])}")
         if unknown_destinations:
             problems.append(
                 f"unknown destination nodes: {', '.join(unknown_destinations[:5])}"
